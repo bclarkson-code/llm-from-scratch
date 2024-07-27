@@ -13,7 +13,6 @@ Matrix Multiplication, with help from cuBLASLt
 // llmc internal imports
 #include "cublas_common.h"
 #include "cuda_common.h"
-#include "python_interface.cuh"
 
 #define PY_SSIZE_T_CLEAN
 
@@ -78,9 +77,11 @@ void matmul_cublaslt(floatX *d, const floatX *a, const floatX *b,
     } else {
       CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&BLayout, CUBLAS_LOWP, k, n, k));
     }
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(
-        &CLayout, (sizeof(floatX) == 1) ? CUDA_R_16BF : CUBLAS_LOWP, m, n, m));
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&DLayout, CUBLAS_LOWP, m, n, m));
+
+    cudaDataType_t computeType =
+        (sizeof(floatX) == sizeof(float)) ? CUDA_R_32F : CUDA_R_16F;
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&CLayout, computeType, m, n, m));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&DLayout, computeType, m, n, m));
     LOG("Matrix layouts created");
 
     // create a preference handle
@@ -164,14 +165,14 @@ extern "C" void matmul_forward(floatX *out, floatX *inp, floatX *weight, int B,
       throw std::runtime_error("cublaslt_workspace is not initialized");
     }
     matmul_cublaslt(out,     // d (output matrix)
-                    weight,  // a (first input matrix)
-                    inp,     // b (second input matrix)
+                    weight,  // b (second input matrix)
+                    inp,     // a (first input matrix)
                     nullptr, // bias
                     OC,      // m (number of rows in output/a)
                     B * T,   // n (number of columns in output/b)
                     C,       // k (number of columns in a / rows in b)
                     stream,  // stream
-                    false,   // transA
+                    true,    // transA
                     false,   // transB
                     0,       // batch_count
                     0,       // strideA
@@ -204,8 +205,8 @@ extern "C" void matmul_weight_backward(floatX *out, floatX *inp, floatX *grad,
     }
     matmul_cublaslt(
         out,     // d (output matrix, weight gradient)
-        inp,     // a (first input matrix, input)
         grad,    // b (second input matrix, output gradient)
+        inp,     // a (first input matrix, input)
         nullptr, // bias (typically not used in weight gradient computation)
         C,  // m (number of rows in weight_grad/inp.T, which is input channels)
         OC, // n (number of columns in weight_grad/gradient, which is output
@@ -213,13 +214,14 @@ extern "C" void matmul_weight_backward(floatX *out, floatX *inp, floatX *grad,
         B * T,  // k (number of columns in inp / rows in gradient, which is
                 // batch_size * sequence_length)
         stream, // stream
-        true,   // transA (transpose input to get inp.T)
-        false,  // transB
+        false,  // transA (transpose input to get inp.T)
+        true,   // transB
         0,      // batch_count
         0,      // strideA
         0,      // strideB
         0,      // strideOut
-        false   // accumulate
+        true    // we want to add the weights grad to any existing grads, not to
+                // overwrite
     );
   } catch (const std::exception &e) {
     std::cerr << "Exception in matmul_forward_cublaslt: " << e.what()
@@ -245,13 +247,13 @@ extern "C" void matmul_input_backward(floatX *out, floatX *weight, floatX *grad,
       throw std::runtime_error("cublaslt_workspace is not initialized");
     }
     matmul_cublaslt(out,     // d (output matrix, input gradient)
-                    grad,    // a (first input matrix, output gradient)
-                    weight,  // b (second input matrix, weight matrix)
+                    weight,  // a (first input matrix, output gradient)
+                    grad,    // b (second input matrix, weight matrix)
                     nullptr, // bias (not used in input gradient computation)
-                    B * T,   // m (number of rows in input_grad/grad, which is
+                    C,       // m (number of rows in input_grad/grad, which is
                              // batch_size * n_tokens)
-                    C,  // n (number of columns in input_grad/weight.T, which is
-                        // input channels)
+                    B * T, // n (number of columns in input_grad/weight.T, which
+                           // is input channels)
                     OC, // k (number of columns in grad / rows in weight, which
                         // is output channels)
                     stream, // stream
@@ -292,18 +294,18 @@ static PyObject *py_matmul_forward(PyObject *self, PyObject *args) {
   LOG("B: " << B << ", T: " << T << ", C: " << C
             << ", out_shape: " << out_shape);
 
-  float *output_ptr, *input_ptr, *weights_ptr;
+  floatX *output_ptr, *input_ptr, *weights_ptr;
 
   // Access the cupy arrays
-  output_ptr = static_cast<float *>(get_array_pointer(output, "output"));
+  output_ptr = static_cast<floatX *>(get_array_pointer(output, "output"));
   if (!output_ptr)
     return NULL;
 
-  input_ptr = static_cast<float *>(get_array_pointer(input, "input"));
+  input_ptr = static_cast<floatX *>(get_array_pointer(input, "input"));
   if (!input_ptr)
     return NULL;
 
-  weights_ptr = static_cast<float *>(get_array_pointer(weights, "weights"));
+  weights_ptr = static_cast<floatX *>(get_array_pointer(weights, "weights"));
   if (!weights_ptr)
     return NULL;
 
@@ -356,18 +358,18 @@ static PyObject *py_matmul_weight_backward(PyObject *self, PyObject *args) {
   LOG("B: " << B << ", T: " << T << ", C: " << C
             << ", out_shape: " << out_shape);
 
-  float *output_ptr, *input_ptr, *grad_ptr;
+  floatX *output_ptr, *input_ptr, *grad_ptr;
 
   // Access the cupy arrays
-  output_ptr = static_cast<float *>(get_array_pointer(output, "output"));
+  output_ptr = static_cast<floatX *>(get_array_pointer(output, "output"));
   if (!output_ptr)
     return NULL;
 
-  input_ptr = static_cast<float *>(get_array_pointer(input, "input"));
+  input_ptr = static_cast<floatX *>(get_array_pointer(input, "input"));
   if (!input_ptr)
     return NULL;
 
-  grad_ptr = static_cast<float *>(get_array_pointer(grad, "grad"));
+  grad_ptr = static_cast<floatX *>(get_array_pointer(grad, "grad"));
   if (!grad_ptr)
     return NULL;
 
@@ -420,18 +422,18 @@ static PyObject *py_matmul_input_backward(PyObject *self, PyObject *args) {
   LOG("B: " << B << ", T: " << T << ", C: " << C
             << ", out_shape: " << out_shape);
 
-  float *output_ptr, *weight_ptr, *grad_ptr;
+  floatX *output_ptr, *weight_ptr, *grad_ptr;
 
   // Access the cupy arrays
-  output_ptr = static_cast<float *>(get_array_pointer(output, "output"));
+  output_ptr = static_cast<floatX *>(get_array_pointer(output, "output"));
   if (!output_ptr)
     return NULL;
 
-  weight_ptr = static_cast<float *>(get_array_pointer(weight, "weight"));
+  weight_ptr = static_cast<floatX *>(get_array_pointer(weight, "weight"));
   if (!weight_ptr)
     return NULL;
 
-  grad_ptr = static_cast<float *>(get_array_pointer(grad, "grad"));
+  grad_ptr = static_cast<floatX *>(get_array_pointer(grad, "grad"));
   if (!grad_ptr)
     return NULL;
 
@@ -465,48 +467,4 @@ static PyObject *py_matmul_input_backward(PyObject *self, PyObject *args) {
   LOG("Completed py_matmul_forward");
 
   Py_RETURN_NONE;
-}
-
-// Module method definitions
-static PyMethodDef LlmcMethods[] = {
-    {"matmul_forward", py_matmul_forward, METH_VARARGS,
-     "Forward op for a dense layer"},
-    {"matmul_weight_backward", py_matmul_weight_backward, METH_VARARGS,
-     "Gradient for weights after a matmul"},
-    {"matmul_input_backward", py_matmul_input_backward, METH_VARARGS,
-     "Gradient for input after a matmul"},
-    {NULL, NULL, 0, NULL} // Sentinel
-};
-
-// Module definition
-static struct PyModuleDef llmcmodule = {PyModuleDef_HEAD_INIT, "llmc", NULL, -1,
-                                        LlmcMethods};
-
-static void llmc_free(void *unused) { cleanup_cublas(); }
-
-PyMODINIT_FUNC PyInit_llmc(void) {
-  PyObject *m;
-
-  m = PyModule_Create(&llmcmodule);
-  if (m == NULL)
-    return NULL;
-
-  if (init_cublas() < 0) {
-    Py_DECREF(m);
-    return NULL;
-  }
-
-  if (PyModule_AddFunctions(m, LlmcMethods) < 0) {
-    Py_DECREF(m);
-    return NULL;
-  }
-
-  if (PyModule_AddObject(
-          m, "__cleanup__",
-          PyCapsule_New((void *)llmc_free, "__cleanup__", NULL)) < 0) {
-    Py_DECREF(m);
-    return NULL;
-  }
-
-  return m;
 }

@@ -37,16 +37,12 @@ class Dataset:
 class UseMixedPrecision:
     def __init__(self):
         self.active = False
-        warn(
-            "Mixed precision training is unstable. Expect your loss to "
-            "explode/vanish."
-        )
 
     def __enter__(self):
         self.active = True
         TRICYCLE_CONTEXT.use_mixed_precision = True
 
-    def __exit__(self):
+    def __exit__(self, *args, **kwargs):
         self.active = False
         TRICYCLE_CONTEXT.use_mixed_precision = False
 

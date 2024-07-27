@@ -2,9 +2,9 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Sequence
 
-import llmc
 from numpy._typing import ArrayLike
 
+import llmc
 from tricycle import TRICYCLE_CONTEXT
 from tricycle.binary import BinaryMultiply
 from tricycle.initialisers import init_xavier
@@ -198,51 +198,26 @@ class CudaDense(Layer):
         self, from_size: int, to_size: int, initialiser=init_xavier, name=None
     ):
         self.weights = initialiser(
-            (from_size, to_size), name="weights" if name is None else name
+            (to_size, from_size), name="weights" if name is None else name
+        )
+        self.weights.array = self.weights.xp.ascontiguousarray(
+            self.weights.array, dtype=self.weights.xp.float16
         )
         self.name = name
         self.from_size = from_size
         self.to_size = to_size
         self.tensors = {"weights": self.weights}
 
-    def weight_back_fn(self, grad: Tensor):
+    def backward(self, grad: Tensor):
         import cupy as cp
 
         batch_size, n_tokens, _ = self._input.shape
 
-        result = cp.empty((self.from_size, self.to_size)).astype(cp.float32)
-
-        # call the kernel. This doesn't return anything but should fill result
-        # with its output instead
-        llmc.matmul_weight_backward(
-            result,
-            self._input,
-            grad.array,
-            batch_size,
-            n_tokens,
-            self.from_size,
-            self.to_size,
-            None,
+        result = cp.empty(
+            (batch_size, n_tokens, self.from_size), dtype=cp.float16
         )
 
-        return Tensor(
-            result,
-            requires_grad=grad.requires_grad,
-            name="back_dense_weight",
-            is_batched=False,
-        )
-
-    def grad_back_fn(self, grad: Tensor):
-        import cupy as cp
-
-        batch_size, n_tokens, _ = self._input.shape
-
-        result = cp.empty((batch_size, n_tokens, self.from_size)).astype(
-            cp.float32
-        )
-
-        # call the kernel. This doesn't return anything but should fill result
-        # with its output instead
+        # calculate the gradient for the input
         llmc.matmul_input_backward(
             result,
             self.weights.array,
@@ -254,6 +229,25 @@ class CudaDense(Layer):
             None,
         )
 
+        # calculate the gradient for the weights and add it to the weights.grad
+        # array
+        if self.weights.grad is None:
+            self.weights.grad = Tensor(
+                cp.zeros((self.to_size, self.from_size), dtype=cp.float16)
+            )
+        # this function accumulates the result rather
+        # than overwriting the contents in the array
+        # This lets us avoid the overhead of another op when backpropagating
+        llmc.matmul_weight_backward(
+            self.weights.grad.array,
+            self._input,
+            grad.array,
+            batch_size,
+            n_tokens,
+            self.from_size,
+            self.to_size,
+            None,
+        )
         return Tensor(
             result,
             requires_grad=grad.requires_grad,
@@ -275,8 +269,8 @@ class CudaDense(Layer):
                 "Expected final dimension of input to equal self.from_size . "
                 f"Found {embedding_dim=} and {self.from_size=}"
             )
-        result = cp.zeros((batch_size, n_tokens, self.to_size)).astype(
-            cp.float32
+        result = cp.empty(
+            (batch_size, n_tokens, self.to_size), dtype=cp.float16
         )
 
         # call the kernel. This doesn't return anything but should fill result
@@ -295,8 +289,8 @@ class CudaDense(Layer):
         return Tensor(
             result,
             name="dense",
-            args=(self.weights, tensor),
-            back_fns=(self.weight_back_fn, self.grad_back_fn),
+            args=(tensor,),
+            back_fns=(self.backward,),
             is_batched=tensor.is_batched,
         )
 

@@ -16,7 +16,7 @@ Common utilities for CUDA code.
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
-#include "utils.h"
+#include "utils.cuh"
 
 // ----------------------------------------------------------------------------
 // Global defines and settings
@@ -69,6 +69,26 @@ inline void cudaFreeCheck(T** ptr, const char *file, int line) {
 }
 #define cudaFreeCheck(ptr) (cudaFreeCheck(ptr, __FILE__, __LINE__))
 
+
+#define CUDA_CHECK(call)                                                       \
+  do {                                                                         \
+    cudaError_t error = call;                                                  \
+    if (error != cudaSuccess) {                                                \
+      std::cerr << "CUDA error in " << __FILE__ << ":" << __LINE__ << ": "     \
+                << cudaGetErrorString(error) << std::endl;                     \
+      throw std::runtime_error("CUDA error");                                  \
+    }                                                                          \
+  } while (0)
+
+#define CUBLAS_CHECK(call)                                                     \
+  do {                                                                         \
+    cublasStatus_t status = call;                                              \
+    if (status != CUBLAS_STATUS_SUCCESS) {                                     \
+      std::cerr << "cuBLAS error in " << __FILE__ << ":" << __LINE__ << ": "   \
+                << cublasGetStatusString(status) << std::endl;                 \
+      throw std::runtime_error("cuBLAS error");                                \
+    }                                                                          \
+  } while (0)
 // ----------------------------------------------------------------------------
 // CUDA Precision settings and defines
 

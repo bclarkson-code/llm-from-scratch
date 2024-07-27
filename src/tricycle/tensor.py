@@ -75,8 +75,8 @@ class Tensor:
                 dtype = np.float16
             else:
                 dtype = DEFAULT_DTYPE
-
-        self.array = self.array.astype(dtype)
+        if self.array.dtype != dtype:
+            self.array = self.array.astype(dtype)
 
         self.requires_grad = requires_grad
         self.is_batched = is_batched

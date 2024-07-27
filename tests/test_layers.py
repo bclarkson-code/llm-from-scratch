@@ -1,8 +1,11 @@
 from copy import copy
 
 import numpy as np
+import pytest
 
+from tricycle import GPU_ENABLED
 from tricycle.layers import (  # noqa: E501
+    CudaDense,
     Dense,
     Dropout,
     Embedding,
@@ -10,6 +13,7 @@ from tricycle.layers import (  # noqa: E501
     Sequential,
 )
 from tricycle.tensor import Tensor
+from tricycle.utils import UseMixedPrecision
 
 
 def test_dense_layer():
@@ -162,3 +166,40 @@ def test_embedding_batched():
             ],
         ]
     )
+
+
+def test_dense_match():
+    if not GPU_ENABLED:
+        pytest.skip()
+
+    INPUT_SHAPE = (4, 3, 2)
+    OUTPUT_SHAPE = 2
+    np.random.seed(0)
+    import cupy as cp
+
+    with UseMixedPrecision():
+        random_data = np.random.random(INPUT_SHAPE).astype(np.float16) * 2 - 1
+        tensor_1 = Tensor(random_data.copy())
+        tensor_2 = Tensor(random_data.copy())
+
+        tensor_1 = tensor_1.to_gpu()
+        tensor_2 = tensor_2.to_gpu()
+
+        dense = Dense(INPUT_SHAPE[-1], OUTPUT_SHAPE)
+        dense.to_gpu()
+        output_1 = dense(tensor_1)
+        output_1.backward()
+
+        cublas_dense = CudaDense(INPUT_SHAPE[-1], OUTPUT_SHAPE)
+        cublas_dense.weights.array = cp.ascontiguousarray(
+            dense.weights.array.copy().T, dtype=cp.float16
+        )
+        cublas_dense.to_gpu()
+        output_2 = cublas_dense(tensor_2)
+        output_2.backward()
+
+        assert output_1.close_to(output_2, rtol=1e-2, atol=1e-5)
+        assert tensor_1.grad.close_to(tensor_2.grad, rtol=1e-2, atol=1e-5)
+        assert dense.weights.grad.close_to(
+            cublas_dense.weights.grad, rtol=1e-2, atol=1e-5
+        )
