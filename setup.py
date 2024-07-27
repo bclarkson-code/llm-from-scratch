@@ -45,13 +45,15 @@ class custom_build_ext(build_ext):
             # Add CUDA-specific flags
             cuda_flags = [
                 "-O3",
+                "-t=0",
                 "--use_fast_math",
                 "--restrict",
-                "-std=c++11",
-                "-DENABLE_FP32",
-                "-UENABLE_FP16",
+                "-std=c++17",
+                "-UENABLE_FP32",
+                "-DENABLE_FP16",
                 "-UENABLE_BF16",
                 "-UENABLE_LOGGING",
+                "-DENABLE_CUDNN",
                 "-D__CUDA_NO_HALF_CONVERSIONS__",
                 "--expt-relaxed-constexpr",
                 "-Xcompiler",
@@ -75,10 +77,11 @@ class custom_build_ext(build_ext):
 
 CUDA_DIR = Path(__file__).parent / "src/tricycle/cuda"
 CONDA_DIR = Path("/home/ben/mambaforge/envs/tricycle")
+CUDNN_FRONTEND = Path(__file__).parent.parent / "cudnn-frontend/include"
 
 ext = CUDAExtension(
     "llmc",
-    sources=[str(CUDA_DIR / "dense.cu")],
+    sources=[str(CUDA_DIR / "python_interface.cu")],
     include_dirs=[
         str(CUDA_DIR.absolute()),
         "/usr/lib/gcc/x86_64-linux-gnu/11/include",
@@ -88,13 +91,14 @@ ext = CUDAExtension(
         str(
             (
                 CONDA_DIR
-                / "nsight-compute/2024.1.1/host/target-linux-x64/nvtx/include/"
+                / "nsight-compute-2024.2.0/host/target-linux-x64/nvtx/include/"
             ).absolute()
         ),
         str(CONDA_DIR / "include"),
+        str(CUDNN_FRONTEND.absolute()),
     ],
     library_dirs=["/usr/local/cuda/lib64"],
-    libraries=["cublas", "cublasLt"],
+    libraries=["cublas", "cublasLt", "cudnn"],
     extra_compile_args=[],  # We'll add CUDA-specific flags in the custom_build_ext
     extra_link_args=[
         "-Xlinker",
