@@ -1,14 +1,33 @@
+"""Provides reduction operations for tensors.
+
+This module contains classes for performing max and min reduction operations
+on tensors using einsum notation.
+"""
+
 from tricycle.einsum import Einsum, Subscript
 from tricycle.ops import Op
 from tricycle.tensor import Tensor
 
 
 class ReduceMax(Op):
+    """Performs max reduction on a tensor along specified dimensions."""
+
     def __call__(self, tensor: Tensor, subscript: Subscript | str):
-        """
-        Generate an indicator tensor that, when einsummed with the tensor,
-        results in a tensor that is equal to the result of max applied along
-        the indices that dont appear in the output of the subscript
+        """Generates an indicator tensor for max reduction using einsum.
+
+        This method creates an indicator tensor that, when einsummed with the
+        input tensor, results in a tensor equal to the max applied along the
+        indices that don't appear in the output of the subscript.
+
+        Args:
+            tensor: The input tensor to perform max reduction on.
+            subscript: The einsum subscript specifying the reduction.
+
+        Returns:
+            A Tensor representing the result of the max reduction.
+
+        Raises:
+            AssertionError: If the subscript suggests more than one input tensor.
         """
         if isinstance(subscript, str):
             subscript = Subscript(subscript)
@@ -43,11 +62,24 @@ class ReduceMax(Op):
 
 
 class ReduceMin(Op):
+    """Performs min reduction on a tensor along specified dimensions."""
+
     def __call__(self, tensor: Tensor, subscript: Subscript | str):
-        """
-        Generate an indicator tensor that, when einsummed with the tensor, results
-        in a tensor that is equal to the result of min applied along the indices
-        that dont appear in the output of the subscript
+        """Generates an indicator tensor for min reduction using einsum.
+
+        This method creates an indicator tensor that, when einsummed with the
+        input tensor, results in a tensor equal to the min applied along the
+        indices that don't appear in the output of the subscript.
+
+        Args:
+            tensor: The input tensor to perform min reduction on.
+            subscript: The einsum subscript specifying the reduction.
+
+        Returns:
+            A Tensor representing the result of the min reduction.
+
+        Raises:
+            AssertionError: If the subscript suggests more than one input tensor.
         """
         if isinstance(subscript, str):
             subscript = Subscript(subscript)

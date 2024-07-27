@@ -1,38 +1,18 @@
 """
-Einsum is a generalisation of a large number of matrix operations.
+Einsum implementation for generalized matrix operations.
 
-You can use it by assigning each axis in your matrices a letter of the
-alphabet (called an index). You can define the operation you want to perform
-by simply listing the indices you want in your inputs and output, separated by
-an arrow.
+This module provides an implementation of the einsum operation, which is a
+generalization of many matrix operations. It allows for flexible manipulation
+of tensors using index notation.
 
-For example, you can define the transpose of a 2d tensor as follows:
+Example usage:
+    >>> a = Tensor([[1,2],[3,4]])
+    >>> Einsum("ij->ji")(a)
+    Tensor([[1. 3.]
+     [2. 4.]], name=einsum ij->ji)
 
->>> a = Tensor([[1,2],[3,4]])
->>> Einsum("ij->ji")(a)
-Tensor([[1. 3.]
- [2. 4.]], name=einsum ij->ji)
-
-Here, we use einsum to swap indices i and j: a transpose.
-
-There are only two rules to remember with einsum:
- - If an index does not appear in the output, any inputs that contain it
-   will be summed along that axis:
-
-    >>> Einsum("ij->i")(a)
-    Tensor([3. 7.], name=einsum ij->i)
-
- - If an index appears in more than one input, the tensors will be multiplied
-   along that axis
-
-   >>> b = Tensor([[5,6],[7,8])
-   >>> Einsum("ij,jk->ik")(a,b)
-    Tensor([[19. 22.]
-     [43. 50.]], name=einsum ij,jk->ik)
-
-
-
-You can use einsum to perform all of these operations:
+For more details on einsum operations, refer to the class and function
+docstrings.
 """
 
 import itertools
@@ -44,7 +24,16 @@ from tricycle.tensor import Tensor, select_backend
 
 class Subscript:
     """
-    A string that defines an einsum operation
+    A string that defines an einsum operation.
+
+    This class parses and represents the subscript notation used in einsum
+    operations.
+
+    Attributes:
+        subscript (str): The original subscript string.
+        inputs (list[list[str]]): Parsed input indices.
+        output (list[str]): Parsed output indices.
+
     """
 
     subscript: str
@@ -53,12 +42,23 @@ class Subscript:
     _index_pattern: re.Pattern = re.compile(r"(?:[A-Za-z]|(?:\.{3}))")
 
     def __init__(self, subscript: str):
+        """
+        Initialize a Subscript object.
+
+        Args:
+            subscript (str): The einsum subscript string.
+        """
         self.subscript = subscript
         self.inputs, self.output = self.split()
 
     def split(self) -> tuple[list[list[str]], list[str]]:
         """
-        Parse a subscripts string into a list of indices and a result
+        Parse a subscripts string into a list of indices and a result.
+
+        Returns:
+            tuple: A tuple containing two elements:
+                - list[list[str]]: Parsed input indices.
+                - list[str]: Parsed output indices.
         """
         indices, result = self.subscript.split("->")
         indices = indices.split(",")
@@ -68,36 +68,99 @@ class Subscript:
 
     @staticmethod
     def join(indices: list[list[str]], result: list[str]) -> str:
+        """
+        Join parsed indices and result back into a subscript string.
+
+        Args:
+            indices (list[list[str]]): Parsed input indices.
+            result (list[str]): Parsed output indices.
+
+        Returns:
+            str: The joined subscript string.
+        """
         inputs_string = ",".join(["".join(idx) for idx in indices])
         outputs_string = "".join(result)
         return f"{inputs_string}->{outputs_string}"
 
     @classmethod
     def from_split(cls, indices: list[list[str]], result: list[str]):
+        """
+        Create a Subscript object from split indices and result.
+
+        Args:
+            indices (list[list[str]]): Parsed input indices.
+            result (list[str]): Parsed output indices.
+
+        Returns:
+            Subscript: A new Subscript object.
+        """
         return cls(cls.join(indices, result))
 
     @property
     def unique_input_indices(self) -> set[str]:
+        """
+        Get the set of unique input indices.
+
+        Returns:
+            set[str]: Set of unique input indices.
+        """
         all_inputs = itertools.chain(*self.inputs)
         return set(all_inputs)
 
     def __repr__(self):
+        """
+        Return a string representation of the Subscript object.
+
+        Returns:
+            str: The subscript string.
+        """
         return self.subscript
 
     def __str__(self):
+        """
+        Return a string representation of the Subscript object.
+
+        Returns:
+            str: The subscript string.
+        """
         return self.subscript
 
 
 class EinsumBackOp:
     """
-    The backward operation for an einsum operation. This is done by
-    swapping the indices and tensors for an input with the output.
-    E.g "ij,jk->ik" with idx = 0 would become "ik,jk->ij"
+    The backward operation for an einsum operation.
+
+    This class represents the backward pass of an einsum operation, which is
+    done by swapping the indices and tensors for an input with the output.
+
+    Attributes:
+        idx (int): The index of the input tensor for which this backward
+            operation is defined.
+        tensors (Sequence[Tensor]): The input tensors of the original einsum
+            operation.
+        subscript (Subscript): The subscript of the original einsum operation.
+        left_tensors (Sequence[Tensor]): Tensors to the left of the current
+            input in the original operation.
+        right_tensors (Sequence[Tensor]): Tensors to the right of the current
+            input in the original operation.
+        combined_subscript (Subscript): The subscript for the backward
+            operation.
     """
 
     def __init__(
         self, idx: int, tensors: Sequence[Tensor], subscript: Subscript
     ):
+        """
+        Initialize an EinsumBackOp object.
+
+        Args:
+            idx (int): The index of the input tensor for which this backward
+                operation is defined.
+            tensors (Sequence[Tensor]): The input tensors of the original
+                einsum operation.
+            subscript (Subscript): The subscript of the original einsum
+                operation.
+        """
         self.idx = idx
         self.tensors = tensors
         self.subscript = subscript
@@ -106,6 +169,14 @@ class EinsumBackOp:
         self.combined_subscript = self._build_subscript()
 
     def _build_inputs(self):
+        """
+        Build the left and right tensor sequences for the backward operation.
+
+        Returns:
+            tuple: A tuple containing two elements:
+                - Sequence[Tensor]: Left tensors.
+                - Sequence[Tensor]: Right tensors.
+        """
         left_tensors = self.tensors[: self.idx]
 
         # Special case for the last index
@@ -117,6 +188,12 @@ class EinsumBackOp:
         return left_tensors, right_tensors
 
     def _build_subscript(self):
+        """
+        Build the subscript for the backward operation.
+
+        Returns:
+            Subscript: The subscript for the backward operation.
+        """
         left_subscript = self.subscript.inputs[: self.idx]
 
         # Special case for the last index
@@ -136,29 +213,65 @@ class EinsumBackOp:
 
     def __call__(self, tensor: Tensor):
         """
-        Build the backward function for einsum. This is done by
-        swapping the indices and tensors for an input with the output.
-        E.g "ij,jk->ik" with idx = 0 would become "ik,jk->ij"
-        """
+        Build the backward function for einsum.
 
+        This is done by swapping the indices and tensors for an input with
+        the output. E.g "ij,jk->ik" with idx = 0 would become "ik,jk->ij"
+
+        Args:
+            tensor (Tensor): The gradient tensor from the previous layer.
+
+        Returns:
+            Tensor: The result of the backward einsum operation.
+        """
         combined_tensors = [*self.left_tensors, tensor, *self.right_tensors]
         return Einsum(self.combined_subscript)(*combined_tensors)
 
     def __repr__(self):
+        """
+        Return a string representation of the EinsumBackOp object.
+
+        Returns:
+            str: A string representation of the object.
+        """
         return f"EinsumBackOp({self.combined_subscript})"
 
 
 class Einsum:
+    """
+    A class representing an einsum operation.
+
+    This class encapsulates the logic for performing einsum operations on
+    tensors, including handling of batched operations and backward passes.
+
+    Attributes:
+        subscript (Subscript): The subscript defining the einsum operation.
+    """
+
     subscript: Subscript
 
     def __init__(self, subscript: str | Subscript):
+        """
+        Initialize an Einsum object.
+
+        Args:
+            subscript (str | Subscript): The subscript defining the einsum
+                operation. Can be a string or a Subscript object.
+        """
         if isinstance(subscript, str):
             subscript = Subscript(subscript)
         self.subscript = subscript
 
     def _build_back_ops(self, tensors: Sequence[Tensor], subscript: Subscript):
         """
-        Figure out the backward operation for each input
+        Figure out the backward operation for each input.
+
+        Args:
+            tensors (Sequence[Tensor]): The input tensors.
+            subscript (Subscript): The subscript for the operation.
+
+        Returns:
+            list: A list of EinsumBackOp objects, one for each input tensor.
         """
         assert len(tensors) == len(subscript.inputs)
 
@@ -178,19 +291,19 @@ class Einsum:
         self, subscript: Subscript, tensors: Sequence[Tensor]
     ) -> tuple[Subscript, Sequence[Tensor]]:
         """
+        Handle the case of a single input tensor.
+
         If there is only one tensor, we need to insert a matrix of ones
-        to allow for expansion operations
+        to allow for expansion operations.
 
-        E.g the reverse operation for einsum("ab->")(x) would be
-        einsum("->ab")(grad), which is not defined. However, if we inject
-        some ones that are the same shape as the input, the forward operation
-        is unaltered while the backward operation is now fully defined:
+        Args:
+            subscript (Subscript): The original subscript.
+            tensors (Sequence[Tensor]): The input tensors.
 
-        # forward
-        einsum("ab,ab->")(x, xp.ones_like(x))
-
-        # backward
-        einsum(",ab->ab")(grad, xp.ones_like(x))
+        Returns:
+            tuple: A tuple containing two elements:
+                - Subscript: The modified subscript.
+                - Sequence[Tensor]: The modified list of tensors.
         """
         xp = select_backend(*tensors)
         if len(tensors) != 1:
@@ -215,8 +328,23 @@ class Einsum:
         self, subscript: Subscript, tensors: Sequence[Tensor]
     ) -> tuple[Subscript, Sequence[Tensor], bool]:
         """
+        Handle batched tensors in the einsum operation.
+
         If a tensor is labelled as being batched, add an extra dimension
         to its indices.
+
+        Args:
+            subscript (Subscript): The original subscript.
+            tensors (Sequence[Tensor]): The input tensors.
+
+        Returns:
+            tuple: A tuple containing three elements:
+                - Subscript: The modified subscript.
+                - Sequence[Tensor]: The input tensors (unchanged).
+                - bool: Whether the output should be batched.
+
+        Raises:
+            ValueError: If 'z' is used in the subscript for non-batched tensors.
         """
         inputs = []
         batch_output = False
@@ -241,8 +369,13 @@ class Einsum:
 
     def _replace_infinity(self, tensors: Sequence[Tensor]):
         """
-        If tensors contain infinity, temporarily replace them with the max
-        value for that datatype
+        Replace infinity values in tensors with the max value for that datatype.
+
+        Args:
+            tensors (Sequence[Tensor]): The input tensors.
+
+        Returns:
+            list: A list of processed tensors with infinity values replaced.
         """
         xp = select_backend(*tensors)
         processed = []
@@ -263,6 +396,15 @@ class Einsum:
         return processed
 
     def __call__(self, *tensors: Tensor):
+        """
+        Perform the einsum operation on the input tensors.
+
+        Args:
+            *tensors (Tensor): The input tensors for the einsum operation.
+
+        Returns:
+            Tensor: The result of the einsum operation.
+        """
         xp = select_backend(*tensors)
         subscript, tensors, batch_output = self._handle_batched(
             self.subscript, tensors

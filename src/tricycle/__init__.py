@@ -1,9 +1,22 @@
-import threading
+"""
+Tricycle: A deep learning framework.
+
+This module initializes the Tricycle framework and imports its various components.
+It also checks for GPU support using CuPY.
+
+Attributes:
+    GPU_ENABLED (bool): Indicates whether GPU support is available.
+
+Imports:
+    Various submodules of the Tricycle framework.
+"""
+
 from warnings import warn
 
 try:
     import cupy
 
+    # check that we can create a cupy array and operate on it
     cupy.array([1, 2, 3]) * 2
     GPU_ENABLED = True
 except ImportError:
@@ -13,11 +26,54 @@ except Exception as e:
     GPU_ENABLED = False
     warn(f"Failed to build cupy array: {e}. Disabling GPU features")
 
-# We use this to store state (e.g whether we're using 16 bit or not)
-# we're using a threading.local to avoid problems with threads
-TRICYCLE_CONTEXT = threading.local()
+from . import (
+    activation,
+    attention,
+    binary,
+    blocks,
+    configs,
+    context,
+    dataset,
+    einsum,
+    exceptions,
+    functions,
+    initialisers,
+    layers,
+    loss,
+    models,
+    ops,
+    optimisers,
+    reduce,
+    scheduler,
+    tensor,
+    tokeniser,
+    unary,
+    utils,
+    weakset,
+)
 
-# you can modify this to use mixed precision all the time but the recommended
-# method for mixed precision training is to use the
-# tricycle/utils.py:UseMixedPrecision context manager
-TRICYCLE_CONTEXT.use_mixed_precision = False
+__all__ = [
+    "activation",
+    "attention",
+    "binary",
+    "blocks",
+    "configs",
+    "context",
+    "dataset",
+    "einsum",
+    "exceptions",
+    "functions",
+    "initialisers",
+    "layers",
+    "loss",
+    "models",
+    "ops",
+    "optimisers",
+    "reduce",
+    "scheduler",
+    "tensor",
+    "tokeniser",
+    "unary",
+    "utils",
+    "weakset",
+]

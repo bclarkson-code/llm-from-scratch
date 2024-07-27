@@ -14,9 +14,10 @@ import uuid
 from pathlib import Path
 
 from tricycle import GPU_ENABLED
+from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.ops import Op
 from tricycle.tensor import Tensor
-from tricycle.utils import optimal_n_tokens
+from tricycle.utils import UseMixedPrecision, optimal_n_tokens
 
 if GPU_ENABLED:
     import cupy as xp
@@ -190,7 +191,7 @@ if GPU_ENABLED:
 mlflow.set_tracking_uri(config.mlflow_tracking_uri)
 mlflow.set_experiment("SmolGPT:fineweb:base")
 os.environ["MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING"] = "true"
-with mlflow.start_run() as run:
+with mlflow.start_run() as run, UseMixedPrecision():
     unique_id = uuid.uuid4()
 
     best_loss = xp.inf
@@ -221,7 +222,15 @@ with mlflow.start_run() as run:
         # Use the optimiser to update weights
         model.update(optimiser)
 
-        mlflow.log_metric("loss", batch_loss, step=step)
+        if TRICYCLE_CONTEXT.use_mixed_precision:
+            mlflow.log_metric(
+                "loss",
+                batch_loss / TRICYCLE_CONTEXT.loss_scale_factor,
+                step=step,
+            )
+        else:
+            mlflow.log_metric("loss", batch_loss, step=step)
+
         mlflow.log_metric("lr", float(optimiser.learning_rate), step=step)
 
         # step the learning rate

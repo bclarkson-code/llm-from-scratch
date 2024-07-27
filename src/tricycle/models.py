@@ -1,3 +1,10 @@
+"""
+GPT model implementation using the Tricycle framework.
+
+This module defines the GPT class, which implements a GPT-style transformer model
+using components from the Tricycle framework.
+"""
+
 import humanize
 import numpy as np
 
@@ -16,7 +23,32 @@ from tricycle.tensor import Tensor
 
 
 class GPT(Layer):
+    """
+    Generative Pre-trained Transformer (GPT) model implementation.
+
+    This class implements a GPT-style transformer model using components from
+    the Tricycle framework. It includes token and position embeddings, multiple
+    transformer blocks, and a final output layer.
+
+    Attributes:
+        embedding_dim (int): Dimension of the embedding space.
+        context_window (int): Size of the context window for position embeddings.
+        token_embedding (Embedding): Embedding layer for input tokens.
+        position_embedding (Embedding): Embedding layer for positional information.
+        input_dropout (Dropout): Dropout layer applied to the input embeddings.
+        blocks (list): List of GPT2TransformerBlock instances.
+        head (Dense): Final dense layer for output.
+        norm (LayerNorm or RMSNorm): Normalization layer.
+        layers (list): List of all layers in the model.
+    """
+
     def __init__(self, config: GPTConfig):
+        """
+        Initializes the GPT model with the given configuration.
+
+        Args:
+            config (GPTConfig): Configuration object containing model parameters.
+        """
         self.embedding_dim = config.embedding_dim
         self.context_window = config.context_window
         self.token_embedding = Embedding(
@@ -65,10 +97,18 @@ class GPT(Layer):
             self.head,
         ]
 
-    def forward(self, tensor: Tensor):
+    def forward(self, tensor: Tensor) -> Tensor:
         """
-        Forward pass of the transformer. inputs is expected to be a one-hot
-        encoded tensor
+        Performs a forward pass through the GPT model.
+
+        Args:
+            tensor (Tensor): Input tensor, expected to be one-hot encoded.
+
+        Returns:
+            Tensor: Output tensor after passing through the model.
+
+        Raises:
+            AssertionError: If the input tensor doesn't match the expected context window size.
         """
         xp = tensor.xp
         if tensor.ndim == 1:
@@ -104,6 +144,12 @@ class GPT(Layer):
         return embedding
 
     def zero_grad(self):
+        """
+        Zeroes out the gradients of all layers in the model.
+
+        Returns:
+            GPT: The current GPT instance.
+        """
         self.token_embedding.zero_grad()
         self.position_embedding.zero_grad()
         self.norm.zero_grad()
@@ -113,6 +159,15 @@ class GPT(Layer):
         return self
 
     def update(self, optimiser: Optimiser):
+        """
+        Updates all layers in the model using the provided optimiser.
+
+        Args:
+            optimiser (Optimiser): The optimiser to use for updating model parameters.
+
+        Returns:
+            GPT: The current GPT instance.
+        """
         self.token_embedding.update(optimiser)
         self.position_embedding.update(optimiser)
         self.norm.update(optimiser)
@@ -122,6 +177,15 @@ class GPT(Layer):
         return self
 
     def to_gpu(self, device: int = 0):
+        """
+        Moves all layers of the model to the specified GPU device.
+
+        Args:
+            device (int, optional): The GPU device number. Defaults to 0.
+
+        Returns:
+            GPT: The current GPT instance.
+        """
         self.token_embedding.to_gpu(device)
         self.position_embedding.to_gpu(device)
         for block in self.blocks:
@@ -131,6 +195,12 @@ class GPT(Layer):
         return self
 
     def from_gpu(self):
+        """
+        Moves all layers of the model from GPU back to CPU.
+
+        Returns:
+            GPT: The current GPT instance.
+        """
         self.token_embedding.from_gpu()
         self.position_embedding.from_gpu()
         for block in self.blocks:
@@ -140,12 +210,16 @@ class GPT(Layer):
         return self
 
     def display(self):
+        """Prints a string representation of the model."""
         print(self)
 
     def _contents(self):
         """
-        Return a flattened list of the layers in this model, along with
-        their depth in the tree of layers
+        Returns a flattened list of the layers in this model, along with
+        their depth in the tree of layers.
+
+        Returns:
+            list: A list of tuples containing layer name, size, and depth.
         """
         stack = [(self, 0)]
 
@@ -155,13 +229,20 @@ class GPT(Layer):
 
             tensors = list(node.tensors.values())
             shapes = [t.shape for t in tensors]
-            size = sum(np.product(shape) for shape in shapes)
+            size = sum(np.prod(shape) for shape in shapes)
             contents.append((node.__class__.__name__, size, indent))
 
             stack.extend((layer, indent + 1) for layer in node.layers[::-1])
         return contents
 
     def __str__(self):
+        """
+        Returns a string representation of the model, including layer sizes
+        and total parameter count.
+
+        Returns:
+            str: A formatted string representing the model structure and size.
+        """
         string = ""
         total = 0
         for layer, size, n_indent in self._contents():

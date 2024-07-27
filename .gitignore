@@ -34,3 +34,6 @@ python*.json
 *.pkl
 build/lib
 datasets/fineweb
+
+# docs
+docs/_build/

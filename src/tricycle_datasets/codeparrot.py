@@ -1,3 +1,17 @@
+"""
+This module prepares and handles the CodeParrot dataset: a dataset of python
+files scraped from github
+
+It downloads, tokenizes, and processes the CodeParrot dataset, creating memory-mapped
+files for efficient data handling during training. The module also provides a
+CodeParrot class for easy access to the processed data.
+
+Typical usage example:
+
+    dataset = CodeParrot(vocab_size=100000, split="train")
+    tokens = dataset[0:1000]  # Get the first 1000 tokens
+"""
+
 import os
 from collections import abc
 from pathlib import Path
@@ -14,18 +28,18 @@ SAVE_DIR = Path("datasets/codeparrot")
 SAVE_DIR.mkdir(exist_ok=True, parents=True)
 DTYPE = np.uint32
 
-
-dataset = load_dataset(
-    "codeparrot/codeparrot-train-v2-near-dedup",
-    split="train",
-    num_proc=N_CORES,
-)
 tokeniser = tiktoken.get_encoding("cl100k_base")
 
 
 def tokenise_document(example):
     """
-    Tokenise a single document from the dataset
+    Tokenizes a single document from the dataset.
+
+    Args:
+        example: A dictionary containing the document content.
+
+    Returns:
+        A dictionary with tokenized 'ids' and 'len' fields.
     """
     ids = tokeniser.encode_ordinary(
         example["content"]
@@ -37,12 +51,14 @@ def tokenise_document(example):
 
 def prepare_data():
     """
-    Download and tokenise the coreparrot dataset. Note, this script is adapted
-    from Andjrey Karpathy's NanoGPT:
-    https://github.com/karpathy/nanoGPT/blob/master/data/openwebtext/prepare.py
+    Downloads and tokenizes the CodeParrot dataset.
 
-    For now, my tokeniser is too slow for large datasets so i'm using openai's
-    tiktokeniser
+    This function splits the dataset into train and validation sets,
+    tokenizes the content, and saves the tokenized data as memory-mapped files.
+
+    Note:
+        This script is adapted from Andrej Karpathy's NanoGPT:
+        https://github.com/karpathy/nanoGPT/blob/master/data/openwebtext/prepare.py
     """
     split_dataset = dataset.train_test_split(
         test_size=0.0005, seed=2357, shuffle=True
@@ -86,6 +102,25 @@ def prepare_data():
 
 
 class CodeParrot(abc.Sequence):
+    """
+    A class to handle the CodeParrot dataset.
+
+    This class provides an interface to access the tokenized CodeParrot dataset,
+    including methods for encoding and decoding text.
+
+    Attributes:
+        url: The source URL of the dataset.
+        vocab_size: The size of the vocabulary.
+        token_path: The path to the tokenized data file.
+        tokeniser_string: The name of the tokenizer to use.
+        tokens: The memory-mapped array of tokens.
+
+    Args:
+        vocab_size: The size of the vocabulary to use.
+        split: The dataset split to use ("train" or "valid").
+        token_path: Optional custom path to the tokenized data file.
+    """
+
     url: str = (
         "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"  # noqa: E501
     )
@@ -121,17 +156,46 @@ class CodeParrot(abc.Sequence):
         self.tokens = np.memmap(self.token_path, dtype=DTYPE, mode="r")
 
     def __getitem__(self, key):
+        """
+        Retrieves tokens at the specified index or slice.
+
+        Args:
+            key: An integer index or slice object.
+
+        Returns:
+            The token(s) at the specified index or slice.
+        """
         return self.tokens[key]
 
     def __len__(self):
+        """
+        Returns the total number of tokens in the dataset.
+
+        Returns:
+            The length of the tokens array.
+        """
         return len(self.tokens)
 
     def encode(self, *args):
+        """
+        Encodes the input text into tokens.
+
+        Args:
+            *args: The text to encode.
+
+        Returns:
+            A list of token ids.
+        """
         return self.tokeniser.encode_ordinary(*args)
 
     def decode(self, *args):
+        """
+        Decodes the input tokens into text.
+
+        Args:
+            *args: The tokens to decode.
+
+        Returns:
+            The decoded text as a string.
+        """
         return self.tokeniser.decode(*args)
-
-
-if __name__ == "__main__":
-    prepare_data()

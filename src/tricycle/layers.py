@@ -4,9 +4,8 @@ from typing import Sequence
 
 from numpy._typing import ArrayLike
 
-import llmc
-from tricycle import TRICYCLE_CONTEXT
 from tricycle.binary import BinaryMultiply
+from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.initialisers import init_xavier
 from tricycle.optimisers import Optimiser
 from tricycle.tensor import Tensor
@@ -15,7 +14,11 @@ from tricycle.unary import nothing
 
 class Layer(ABC):
     """
-    A generic Layer object, representing a single operation in a neural network
+    A generic Layer object, representing a single operation in a neural network.
+
+    Attributes:
+        tensors (dict[str, Tensor]): Dictionary of tensors used in the layer.
+        layers (Sequence[Layer]): Sequence of sub-layers, if any.
     """
 
     tensors: dict[str, Tensor] = {}
@@ -23,21 +26,55 @@ class Layer(ABC):
 
     @abstractmethod
     def forward(self, tensor: Tensor):
+        """
+        Perform the forward pass of the layer.
+
+        Args:
+            tensor (Tensor): Input tensor.
+
+        Raises:
+            NotImplementedError: This method should be implemented by subclasses.
+        """
         raise NotImplementedError
 
     def __call__(self, tensor: Tensor, *args, **kwargs):
+        """
+        Call the layer as a function.
+
+        Args:
+            tensor (Tensor): Input tensor.
+            *args: Variable length argument list.
+            **kwargs: Arbitrary keyword arguments.
+
+        Returns:
+            The result of the forward pass.
+        """
         return self.forward(tensor, *args, **kwargs)
 
     def update(self, optimiser: Optimiser):
+        """
+        Update the layer's parameters using the given optimiser.
+
+        Args:
+            optimiser (Optimiser): The optimiser to use for updating parameters.
+        """
         pass
 
     def zero_grad(self):
+        """Reset gradients to zero."""
         pass
 
     def to_gpu(self, device: int = 0):
+        """
+        Move the layer to GPU.
+
+        Args:
+            device (int): The GPU device number. Defaults to 0.
+        """
         pass
 
     def from_gpu(self):
+        """Move the layer from GPU to CPU."""
         pass
 
 
@@ -121,6 +158,16 @@ class CudaLayer(Layer):
 
 
 class Dense(Layer):
+    """
+    A dense (fully connected) layer.
+
+    Attributes:
+        weights (Tensor): The weight matrix.
+        from_size (int): Input size.
+        to_size (int): Output size.
+        name (str | None): Optional name for the layer.
+    """
+
     weights: Tensor
     from_size: int
     to_size: int
@@ -129,6 +176,15 @@ class Dense(Layer):
     def __init__(
         self, from_size: int, to_size: int, initialiser=init_xavier, name=None
     ):
+        """
+        Initialize the Dense layer.
+
+        Args:
+            from_size (int): Input size.
+            to_size (int): Output size.
+            initialiser: Function to initialize weights. Defaults to init_xavier.
+            name (str | None): Optional name for the layer.
+        """
         self.weights = initialiser(
             (from_size, to_size), name="weights" if name is None else name
         )
@@ -138,6 +194,15 @@ class Dense(Layer):
         self.tensors = {"weights": self.weights}
 
     def weight_back_fn(self, grad: Tensor):
+        """
+        Compute gradients with respect to weights.
+
+        Args:
+            grad (Tensor): Gradient from the next layer.
+
+        Returns:
+            Tensor: Gradient with respect to weights.
+        """
         xp = grad.xp
 
         indices = list(range(grad.ndim - 1))
@@ -150,7 +215,21 @@ class Dense(Layer):
         )
 
     def grad_back_fn(self, grad: Tensor):
+        """
+        Compute gradients with respect to input.
+
+        Args:
+            grad (Tensor): Gradient from the next layer.
+
+        Returns:
+            Tensor: Gradient with respect to input.
+        """
         xp = grad.xp
+
+        weights = self.weights.array
+        if TRICYCLE_CONTEXT.use_mixed_precision:
+            weights = weights.astype(xp.float16)
+
         result = xp.tensordot(grad.array, self.weights.array, axes=[-1, -1])
         return Tensor(
             result,
@@ -160,10 +239,24 @@ class Dense(Layer):
         )
 
     def forward(self, tensor: Tensor):
+        """
+        Perform the forward pass of the dense layer.
+
+        Args:
+            tensor (Tensor): Input tensor.
+
+        Returns:
+            Tensor: Output of the dense layer.
+        """
         xp = tensor.xp
 
         self._input = tensor.array
-        result = xp.tensordot(tensor.array, self.weights.array, axes=[-1, 0])
+        weights = self.weights.array
+
+        if TRICYCLE_CONTEXT.use_mixed_precision:
+            weights = weights.astype(xp.float16)
+
+        result = xp.tensordot(tensor.array, weights, axes=[-1, 0])
 
         return Tensor(
             result,
@@ -174,16 +267,38 @@ class Dense(Layer):
         )
 
     def update(self, optimiser: Optimiser):
+        """
+        Update the weights using the given optimiser.
+
+        Args:
+            optimiser (Optimiser): The optimiser to use for updating weights.
+        """
         self.weights = optimiser(self.weights)
 
     def zero_grad(self):
+        """Reset gradients to zero."""
         self.weights.grad = None
 
     def to_gpu(self, device: int = 0):
+        """
+        Move the layer to GPU.
+
+        Args:
+            device (int): The GPU device number. Defaults to 0.
+
+        Returns:
+            Dense: The layer itself.
+        """
         self.weights.to_gpu(device)
         return self
 
     def from_gpu(self):
+        """
+        Move the layer from GPU to CPU.
+
+        Returns:
+            Dense: The layer itself.
+        """
         self.weights.from_gpu()
         return self
 
@@ -310,10 +425,32 @@ class CudaDense(Layer):
 
 
 class Dropout(Layer):
+    """
+    A dropout layer for regularization.
+
+    Attributes:
+        probability (float): The probability of dropping out a unit.
+    """
+
     def __init__(self, probability: float):
+        """
+        Initialize the Dropout layer.
+
+        Args:
+            probability (float): The probability of dropping out a unit.
+        """
         self.probability = probability
 
     def forward(self, tensor: Tensor):
+        """
+        Perform the forward pass of the dropout layer.
+
+        Args:
+            tensor (Tensor): Input tensor.
+
+        Returns:
+            Tensor: Output tensor with dropout applied.
+        """
         if self.probability == 0:
             return tensor
         xp = tensor.xp
@@ -326,7 +463,23 @@ class Dropout(Layer):
 
 
 class LayerNorm(Layer):
+    """
+    A Layer Normalization layer.
+
+    Attributes:
+        eps (float): A small value added for numerical stability.
+        gamma (Tensor): Scale parameter.
+        beta (Tensor): Shift parameter.
+    """
+
     def __init__(self, embedding_dim: int, eps=1e-5):
+        """
+        Initialize the LayerNorm layer.
+
+        Args:
+            embedding_dim (int): The size of the input's last dimension.
+            eps (float): A small value added for numerical stability. Defaults to 1e-5.
+        """
         import numpy as np
 
         self.eps = eps
@@ -339,27 +492,23 @@ class LayerNorm(Layer):
 
     def forward(self, tensor: Tensor):
         """
-        Performs Layer Normalization on the input tensor x.
+        Perform the forward pass of the layer normalization.
 
         Args:
-            x (numpy.ndarray): Input tensor of shape (batch_size, *).
+            tensor (Tensor): Input tensor of shape (batch_size, *).
 
         Returns:
-            numpy.ndarray: Normalized tensor of the same shape as x.
+            Tensor: Normalized tensor of the same shape as input.
         """
         xp = tensor.xp
         x = tensor.array
 
-        # Compute mean and variance along the feature dimension
-        # This is pretty sensitive to errors so we need to do it at full
-        # precision
         if TRICYCLE_CONTEXT.use_mixed_precision:
             x = x.astype(xp.float32)
         self._mean = x.mean(axis=-1, keepdims=True)
         self._var = x.var(axis=-1, keepdims=True)
         self._input = x
 
-        # Normalize and scale
         x_norm = (x - self._mean) / xp.sqrt(self._var + self.eps)
         output = self.gamma.array * x_norm + self.beta.array
 
@@ -377,11 +526,16 @@ class LayerNorm(Layer):
 
     def gamma_back_fn(self, grad: Tensor):
         """
-        backward pass for grad
+        Compute gradients with respect to gamma.
+
+        Args:
+            grad (Tensor): Gradient from the next layer.
+
+        Returns:
+            Tensor: Gradient with respect to gamma.
         """
         xp = grad.xp
 
-        # Compute intermediate values
         x_norm = (self._input - self._mean) / xp.sqrt(self._var + self.eps)
         axes = tuple(range(grad.ndim - 1))
         result = xp.sum(grad.array * x_norm, axis=axes)
@@ -392,11 +546,16 @@ class LayerNorm(Layer):
 
     def beta_back_fn(self, grad: Tensor):
         """
-        backward pass for grad
+        Compute gradients with respect to beta.
+
+        Args:
+            grad (Tensor): Gradient from the next layer.
+
+        Returns:
+            Tensor: Gradient with respect to beta.
         """
         xp = grad.xp
 
-        # Compute intermediate values
         axes = tuple(range(grad.ndim - 1))
         result = xp.sum(grad.array, axis=axes)
         if TRICYCLE_CONTEXT.use_mixed_precision:
@@ -405,14 +564,18 @@ class LayerNorm(Layer):
 
     def back_fn(self, grad: Tensor):
         """
-        backward pass for grad
+        Compute gradients with respect to input.
+
+        Args:
+            grad (Tensor): Gradient from the next layer.
+
+        Returns:
+            Tensor: Gradient with respect to input.
         """
         xp = grad.xp
 
-        # Compute intermediate values
         n = self._input.shape[-1]
 
-        # Gradients with respect to x
         dx_norm = grad.array * self.gamma.array
         dvar = xp.sum(
             dx_norm
@@ -445,25 +608,59 @@ class LayerNorm(Layer):
         )
 
     def update(self, optimiser: Optimiser):
+        """
+        Update the layer's parameters using the given optimiser.
+
+        Args:
+            optimiser (Optimiser): The optimiser to use for updating parameters.
+        """
         self.gamma = optimiser(self.gamma)
         self.beta = optimiser(self.beta)
 
     def zero_grad(self):
+        """Reset gradients to zero."""
         self.gamma.grad = None
         self.beta.grad = None
 
     def to_gpu(self, device: int = 0):
+        """
+        Move the layer to GPU.
+
+        Args:
+            device (int): The GPU device number. Defaults to 0.
+
+        Returns:
+            LayerNorm: The layer itself.
+        """
         self.gamma.to_gpu(device)
         self.beta.to_gpu(device)
         return self
 
     def from_gpu(self):
+        """
+        Move the layer from GPU to CPU.
+
+        Returns:
+            LayerNorm: The layer itself.
+        """
         self.gamma.from_gpu()
         self.beta.from_gpu()
         return self
 
 
 class RMSNorm(Layer):
+    """Root Mean Square Layer Normalization.
+
+    This class implements RMSNorm, a normalization technique that normalizes
+    the inputs using the root mean square.
+
+    Attributes:
+        embedding_dim (int): The size of the input's last dimension.
+        REALLY_SMALL_NUMBER (float): A small constant to avoid division by zero.
+        weights (Tensor): Learnable scale parameters.
+
+    """
+
     def __init__(self, embedding_dim: int, REALLY_SMALL_NUMBER=1e-4):
         import numpy as np
 
@@ -474,14 +671,13 @@ class RMSNorm(Layer):
         )
 
     def forward(self, tensor: Tensor):
-        """
-        Performs Layer Normalization on the input tensor x.
+        """Applies RMS normalization to the input tensor.
 
         Args:
-            x (numpy.ndarray): Input tensor of shape (batch_size, *).
+            tensor (Tensor): Input tensor to be normalized.
 
         Returns:
-            numpy.ndarray: Normalized tensor of the same shape as x.
+            Tensor: The normalized output tensor.
         """
         xp = tensor.xp
         x = tensor.array
@@ -513,8 +709,13 @@ class RMSNorm(Layer):
         )
 
     def weight_back_fn(self, grad: Tensor):
-        """
-        backward pass for grad
+        """Computes the gradient with respect to the weights.
+
+        Args:
+            grad (Tensor): The gradient tensor.
+
+        Returns:
+            Tensor: The gradient with respect to the weights.
         """
         xp = grad.xp
 
@@ -531,8 +732,13 @@ class RMSNorm(Layer):
         return Tensor(result, is_batched=False)
 
     def back_fn(self, grad: Tensor):
-        """
-        backward pass for grad
+        """Computes the gradient with respect to the input.
+
+        Args:
+            grad (Tensor): The gradient tensor.
+
+        Returns:
+            Tensor: The gradient with respect to the input.
         """
         xp = grad.xp
 
@@ -555,24 +761,49 @@ class RMSNorm(Layer):
         )
 
     def update(self, optimiser: Optimiser):
+        """Updates the layer's parameters using the given optimizer.
+
+        Args:
+            optimiser (Optimiser): The optimizer to use for updating parameters.
+        """
         self.weights = optimiser(self.weights)
 
     def zero_grad(self):
+        """Resets the gradient of the weights to None."""
         self.weights.grad = None
 
     def to_gpu(self, device: int = 0):
+        """Moves the layer's parameters to the GPU.
+
+        Args:
+            device (int): The GPU device number.
+
+        Returns:
+            RMSNorm: The layer with parameters moved to GPU.
+        """
         self.weights.to_gpu(device)
         return self
 
     def from_gpu(self):
+        """Moves the layer's parameters from GPU to CPU.
+
+        Returns:
+            RMSNorm: The layer with parameters moved to CPU.
+        """
         self.weights.from_gpu()
         return self
 
 
 class Embedding(Layer):
-    """
-    Convert an index to an embedding with a lookup (rather than a one-hot
-    encoding and a matrix multiplication)
+    """Embedding layer that converts indices to dense vectors.
+
+    This layer implements a lookup-based embedding, converting input indices
+    to dense vector representations.
+
+    Attributes:
+        weights (Tensor): The embedding matrix.
+        vocab_size (int): Size of the vocabulary (number of embeddings).
+
     """
 
     def __init__(
@@ -588,6 +819,14 @@ class Embedding(Layer):
         self.vocab_size = from_size
 
     def back_fn(self, grad: Tensor):
+        """Computes the gradient with respect to the embedding weights.
+
+        Args:
+            grad (Tensor): The gradient tensor.
+
+        Returns:
+            Tensor: The gradient with respect to the embedding weights.
+        """
         xp = grad.xp
         out = xp.zeros(self.weights.shape)
 
@@ -604,17 +843,33 @@ class Embedding(Layer):
         return Tensor(out, requires_grad=grad.requires_grad)
 
     def forward(self, tensor: Tensor):
+        """Performs the embedding lookup.
+
+        Args:
+            tensor (Tensor): Input tensor containing indices to be embedded.
+
+        Returns:
+            Tensor: The embedded representation of the input indices.
+        """
         assert (
             tensor.requires_grad is False
         ), "Cannot embed a differentiable tensor"
 
+        xp = tensor.xp
         self.input = tensor
+
+        weights = self.weights.array
+        # if were using mixed precision, copy the weights into 16 bit for
+        # processing
+        if TRICYCLE_CONTEXT.use_mixed_precision:
+            weights = weights.astype(xp.float16)
+
         if tensor.is_batched:
-            self._out = self.weights.array[tensor.array.flatten()].reshape(
+            self._out = weights[tensor.array.flatten()].reshape(
                 tensor.array.shape + (-1,)
             )
         else:
-            self._out = self.weights.array[tensor.array]
+            self._out = weights[tensor.array]
         result = Tensor(self._out, is_batched=tensor.is_batched)
 
         result.args = (tensor, self.weights)
@@ -623,52 +878,121 @@ class Embedding(Layer):
         return result
 
     def update(self, optimiser: Optimiser):
+        """Updates the embedding weights using the given optimizer.
+
+        Args:
+            optimiser (Optimiser): The optimizer to use for updating weights.
+        """
         self.weights = optimiser(self.weights)
 
     def zero_grad(self):
+        """Resets the gradient of the weights to None."""
         self.weights.grad = None
 
     def to_gpu(self, device: int = 0):
+        """Moves the embedding weights to the GPU.
+
+        Args:
+            device (int): The GPU device number.
+
+        Returns:
+            Embedding: The embedding layer with weights moved to GPU.
+        """
         self.weights.to_gpu(device)
         return self
 
     def from_gpu(self):
+        """Moves the embedding weights from GPU to CPU.
+
+        Returns:
+            Embedding: The embedding layer with weights moved to CPU.
+        """
         self.weights.from_gpu()
         return self
 
 
 class Sequential(Layer):
+    """A sequential container of layers.
+
+    This class allows for the creation of a sequential chain of layers,
+    where the output of each layer is fed as input to the next layer.
+
+    Attributes:
+        layers (tuple): A tuple of Layer objects in the sequential chain.
+
+    """
+
     def __init__(self, *layers: Layer):
         self.layers = layers
 
     def __getitem__(self, idx):
+        """Retrieves a layer by index.
+
+        Args:
+            idx: The index of the layer to retrieve.
+
+        Returns:
+            Layer: The layer at the specified index.
+        """
         return self.layers[idx]
 
     def forward(self, tensor: Tensor):
+        """Performs a forward pass through all layers in the sequential chain.
+
+        Args:
+            tensor (Tensor): The input tensor.
+
+        Returns:
+            Tensor: The output tensor after passing through all layers.
+        """
         for layer in self.layers:
             tensor = layer(tensor)
         return tensor
 
     def update(self, optimiser: Optimiser):
+        """Updates all layers using the given optimizer.
+
+        Args:
+            optimiser (Optimiser): The optimizer to use for updating layers.
+        """
         for layer in self.layers:
             layer.update(optimiser)
 
     def zero_grad(self):
+        """Resets the gradients of all layers to None."""
         for layer in self.layers:
             layer.zero_grad()
 
     def to_gpu(self, device: int = 0):
+        """Moves all layers to the GPU.
+
+        Args:
+            device (int): The GPU device number.
+        """
         for layer in self.layers:
             layer.to_gpu(device)
 
     def from_gpu(self):
+        """Moves all layers from GPU to CPU."""
         for layer in self.layers:
             layer.from_gpu()
 
 
 class RotaryEncode(Layer):
-    """
-    Apply rotary positional encoding to a key and query
+    """Applies rotary positional encoding to a key and query.
+
+    This layer implements the Rotary Position Embedding (RoPE) technique
+    for transformer models.
+
+    Attributes:
+        embedding_dim (int): The size of the embedding dimension.
+        n_heads (int): The number of attention heads.
+        context_window (int): The size of the context window.
+        theta (float): The base value for frequency calculation.
+        head_size (int): The size of each attention head.
+        freqs_cos (ArrayLike): Precomputed cosine of frequencies.
+        freqs_sin (ArrayLike): Precomputed sine of frequencies.
+
     """
 
     embedding_dim: int
@@ -696,6 +1020,11 @@ class RotaryEncode(Layer):
         self.freqs_cos, self.freqs_sin = self.precompute_constants()
 
     def precompute_constants(self) -> tuple[ArrayLike, ArrayLike]:
+        """Precomputes the cosine and sine of frequencies for rotary encoding.
+
+        Returns:
+            tuple[ArrayLike, ArrayLike]: Precomputed cosine and sine values.
+        """
         # this is run once at initialisation so we dont get any benefit from
         # cupy using
         import numpy as np
@@ -721,6 +1050,14 @@ class RotaryEncode(Layer):
         return freqs_cos, freqs_sin
 
     def backward(self, grad: Tensor) -> Tensor:
+        """Computes the gradient for the rotary encoding operation.
+
+        Args:
+            grad (Tensor): The gradient tensor.
+
+        Returns:
+            Tensor: The gradient with respect to the input.
+        """
         xp = grad.xp
 
         # split the final dimension in 2 putting every
@@ -749,6 +1086,14 @@ class RotaryEncode(Layer):
         )
 
     def forward(self, tensor: Tensor) -> Tensor:
+        """Applies rotary positional encoding to the input tensor.
+
+        Args:
+            tensor (Tensor): The input tensor.
+
+        Returns:
+            Tensor: The tensor with rotary positional encoding applied.
+        """
         xp = tensor.xp
 
         # split the final dimension in 2 putting every

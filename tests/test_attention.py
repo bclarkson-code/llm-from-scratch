@@ -1,9 +1,9 @@
 import numpy as np
 import torch
 
-from tricycle import TRICYCLE_CONTEXT
 from tricycle.attention import Attention, build_mask
 from tricycle.blocks import MultiHeadSelfAttention
+from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.einsum import Einsum
 from tricycle.functions import Softmax
 from tricycle.tensor import DEFAULT_DTYPE, Tensor

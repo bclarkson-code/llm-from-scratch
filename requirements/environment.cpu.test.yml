@@ -22,6 +22,10 @@ dependencies:
   - hypothesis
   - pytorch==2 # we use this to test correctness, not to cheat
   - pre-commit
+  # docs dependencies
+  - sphinx
+  - furo
+  - recommonmark
   # install tricycle
   - pip
   - pip:

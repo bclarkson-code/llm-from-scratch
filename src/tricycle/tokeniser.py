@@ -1,3 +1,12 @@
+"""
+A module for implementing a Byte Pair Encoding (BPE) tokenizer.
+
+This module provides functionality for training and using a BPE tokenizer,
+which is a subword tokenization algorithm commonly used in natural language processing.
+
+The implementation uses Numba for performance optimization of critical functions.
+"""
+
 import pickle
 from pathlib import Path
 from warnings import warn
@@ -12,7 +21,15 @@ def replace_pair(
     data: np.ndarray, pair: tuple[int, int], token_id: int
 ) -> np.ndarray:
     """
-    Replace every occurrence of `pair` with `token_id`
+    Replace every occurrence of `pair` with `token_id` in the given data array.
+
+    Args:
+        data: A numpy array of integers representing the input data.
+        pair: A tuple of two integers representing the pair to be replaced.
+        token_id: An integer representing the new token ID to replace the pair.
+
+    Returns:
+        A numpy array with the pair replacements applied.
     """
     new = 0
     old = 0
@@ -40,9 +57,17 @@ def replace_pair(
 @njit
 def count_pairs(data: np.ndarray, token_id: int) -> np.ndarray:
     """
-    Count the number of occurences of each pair of ints in an array
-    Note: I tried setting parallel to True, but it was slower than
-    turning it off
+    Count the number of occurrences of each pair of integers in an array.
+
+    Args:
+        data: A numpy array of integers representing the input data.
+        token_id: The maximum token ID to consider when counting pairs.
+
+    Returns:
+        A numpy array containing the counts of each possible pair.
+
+    Note:
+        Parallel execution was tried but found to be slower than sequential execution.
     """
     counts = np.zeros((token_id + 1) ** 2, dtype=np.int32)
     for i in range(len(data) - 1):
@@ -56,18 +81,30 @@ class BPETokeniser:
     """
     A simple byte pair encoding tokeniser.
 
-    In vanilla python, this is really slow so some functions have been
-    sped up with numba
+    This class implements a BPE tokenizer with performance optimizations using Numba.
+    It can be trained on text data and used to tokenize and detokenize text.
+
+    Attributes:
+        vocab_size: The maximum size of the vocabulary.
+        merges: A dictionary mapping token pairs to new token IDs.
+        pairs: A list of token pairs in the order they were merged.
+        vocab: A list of byte strings representing each token.
+        type_: A string indicating the implementation type (always "numba" in this version).
+
     """
 
-    # we cant have less than the number of possible single bytes
     MIN_TOKENS = 256
 
-    vocab_size: int
-    merges: dict[tuple[int, int | None], int]
-    pairs: list[tuple[int, int | None]]
-
     def __init__(self, vocab_size: int):
+        """
+        Initialize a BPETokeniser instance.
+
+        Args:
+            vocab_size: The desired size of the vocabulary. Must be at least MIN_TOKENS.
+
+        Raises:
+            AssertionError: If vocab_size is less than MIN_TOKENS.
+        """
         assert (
             vocab_size >= self.MIN_TOKENS
         ), f"vocab_size must be >= {self.MIN_TOKENS}"
@@ -82,13 +119,33 @@ class BPETokeniser:
     def replace_pair(
         self, data: np.ndarray, pair: tuple[int, int], token_id: int
     ) -> np.ndarray:
+        """
+        Replace occurrences of a pair with a new token ID.
+
+        This method is a wrapper around the `replace_pair` function.
+
+        Args:
+            data: A numpy array of integers representing the input data.
+            pair: A tuple of two integers representing the pair to be replaced.
+            token_id: An integer representing the new token ID to replace the pair.
+
+        Returns:
+            A numpy array with the pair replacements applied.
+        """
         return replace_pair(data=data, pair=pair, token_id=token_id)
 
     def most_common_pair(
         self, counts: np.ndarray, token_id: int
     ) -> tuple[int, int] | None:
         """
-        Return the most common pair.
+        Find the most common pair of tokens in the given counts array.
+
+        Args:
+            counts: A numpy array containing the counts of each possible pair.
+            token_id: The maximum token ID to consider.
+
+        Returns:
+            A tuple of two integers representing the most common pair, or None if no repeated pairs exist.
         """
         most_common_idx = np.argmax(counts)
 
@@ -103,7 +160,17 @@ class BPETokeniser:
 
     def train_ints(self, int_array: np.ndarray, loading_bar=False):
         """
-        Train the tokeniser on an array of ints
+        Train the tokeniser on an array of integers.
+
+        Args:
+            int_array: A numpy array of integers representing the training data.
+            loading_bar: A boolean indicating whether to display a progress bar during training.
+
+        Returns:
+            The trained BPETokeniser instance.
+
+        Warns:
+            If the number of pairs after training is less than the specified vocab_size.
         """
         token_ids = range(self.MIN_TOKENS, self.vocab_size)
         if loading_bar:
@@ -135,7 +202,13 @@ class BPETokeniser:
 
     def train(self, text: str):
         """
-        Train the tokeniser on a string
+        Train the tokeniser on a string.
+
+        Args:
+            text: A string to train the tokeniser on.
+
+        Returns:
+            The trained BPETokeniser instance.
         """
         as_bytes = text.encode("utf-8")
         as_ints = np.array(list(as_bytes), dtype=np.int32)
@@ -145,7 +218,14 @@ class BPETokeniser:
         self, int_array: np.ndarray, loading_bar=False
     ) -> np.ndarray:
         """
-        Tokenise an array of ints
+        Tokenize an array of integers.
+
+        Args:
+            int_array: A numpy array of integers to tokenize.
+            loading_bar: A boolean indicating whether to display a progress bar during tokenization.
+
+        Returns:
+            A numpy array of tokenized integers.
         """
         if not isinstance(int_array, np.ndarray):
             int_array = np.array(int_array, dtype=np.int32)
@@ -161,7 +241,13 @@ class BPETokeniser:
 
     def encode(self, text: str) -> np.ndarray:
         """
-        Tokenise a string
+        Tokenize a string.
+
+        Args:
+            text: A string to tokenize.
+
+        Returns:
+            A numpy array of token IDs.
         """
         as_bytes = text.encode("utf-8")
         as_ints = np.array(list(as_bytes))
@@ -170,7 +256,13 @@ class BPETokeniser:
 
     def decode(self, tokens: np.ndarray | int) -> str:
         """
-        Convert tokens into a string
+        Convert tokens into a string.
+
+        Args:
+            tokens: A numpy array of token IDs or a single integer token ID.
+
+        Returns:
+            The decoded string.
         """
         if not isinstance(tokens, np.ndarray):
             tokens = np.array([tokens])
@@ -181,6 +273,12 @@ class BPETokeniser:
         return decoded.decode("utf-8", errors="replace")
 
     def save(self, path: str | Path):
+        """
+        Save the tokeniser to a file.
+
+        Args:
+            path: A string or Path object representing the file path to save the tokeniser.
+        """
         with open(path, "wb") as f:
             state = {
                 "vocab_size": self.vocab_size,
@@ -191,6 +289,15 @@ class BPETokeniser:
 
     @classmethod
     def load(cls, path: str | Path):
+        """
+        Load a tokeniser from a file.
+
+        Args:
+            path: A string or Path object representing the file path to load the tokeniser from.
+
+        Returns:
+            A BPETokeniser instance loaded from the file.
+        """
         with open(path, "rb") as f:
             state = pickle.load(f)
             result = cls(

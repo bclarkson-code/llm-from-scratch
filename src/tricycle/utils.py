@@ -1,3 +1,11 @@
+"""Utility functions and classes for the Tricycle project.
+
+This module contains various utility functions and classes used throughout
+the Tricycle project, including dataset handling, mixed precision training,
+tensor shape matching, and performance logging.
+
+"""
+
 import time
 from abc import abstractmethod
 from pathlib import Path
@@ -6,10 +14,10 @@ from warnings import warn
 
 import humanize
 import numpy as np
-from matplotlib import pyplot as plt
 
-from tricycle import GPU_ENABLED, TRICYCLE_CONTEXT
-from tricycle.configs import GPTConfig, SmolGPTConfig
+from tricycle import GPU_ENABLED
+from tricycle.configs import GPTConfig
+from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.exceptions import GPUDisabledException
 
 if TYPE_CHECKING:
@@ -18,39 +26,74 @@ if TYPE_CHECKING:
 
 
 class Dataset:
+    """Abstract base class for datasets.
+
+    This class defines the interface for dataset objects used in the project.
+    Subclasses should implement the __len__ and __getitem__ methods.
+    """
+
     @abstractmethod
     def __len__(self):
+        """Returns the number of items in the dataset."""
         raise NotImplementedError
 
     @abstractmethod
     def __getitem__(self, index):
+        """Returns the item at the specified index."""
         raise NotImplementedError
 
     def __iter__(self):
+        """Returns an iterator over the dataset."""
         for idx in range(self.__len__()):
             yield self.__getitem__(idx)
 
     def __next__(self):
+        """Returns the next item in the dataset."""
         return self.__getitem__(next(iter(self)))
 
 
 class UseMixedPrecision:
-    def __init__(self):
+    """Context manager for enabling mixed precision training.
+
+    This class provides a context manager that enables mixed precision training
+    when entered and disables it when exited.
+
+    Args:
+        initial_loss_scale_factor (int): The initial loss scale factor for mixed
+            precision training. Defaults to 128.
+    """
+
+    def __init__(self, initial_loss_scale_factor: int = 128):
         self.active = False
+        TRICYCLE_CONTEXT.loss_scale_factor = initial_loss_scale_factor
+        warn(
+            "Mixed precision training is unstable. Expect your loss to "
+            "explode/vanish."
+        )
 
     def __enter__(self):
+        """Enables mixed precision training."""
         self.active = True
         TRICYCLE_CONTEXT.use_mixed_precision = True
 
     def __exit__(self, *args, **kwargs):
+        """Disables mixed precision training."""
         self.active = False
         TRICYCLE_CONTEXT.use_mixed_precision = False
 
 
 def shapes_match(tensor_1: "Tensor", tensor_2: "Tensor") -> bool:
-    """
-    Binary operations can only be performed if the matrices are the same shape
-    This function checks that we are allowed to apply a binary Op.
+    """Checks if the shapes of two tensors match for binary operations.
+
+    Args:
+        tensor_1: The first tensor to compare.
+        tensor_2: The second tensor to compare.
+
+    Returns:
+        bool: True if the shapes match, False otherwise.
+
+    Raises:
+        ValueError: If the shapes do not match.
     """
     # sourcery skip: assign-if-exp, merge-duplicate-blocks, remove-redundant-if
     if tensor_1.is_batched and tensor_2.is_batched:
@@ -75,8 +118,14 @@ def shapes_match(tensor_1: "Tensor", tensor_2: "Tensor") -> bool:
 
 
 def smooth(iterable: Iterable, factor: float):
-    """
-    Use exponential smoothing to smooth an array
+    """Applies exponential smoothing to an iterable.
+
+    Args:
+        iterable: The input iterable to smooth.
+        factor: The smoothing factor.
+
+    Yields:
+        float: The smoothed values.
     """
     prev = 0
     for val in iterable:
@@ -85,8 +134,14 @@ def smooth(iterable: Iterable, factor: float):
 
 
 def r_squared(actual_values, predicted_values):
-    """
-    calculate R-squared metric.
+    """Calculates the R-squared metric.
+
+    Args:
+        actual_values: The actual values.
+        predicted_values: The predicted values.
+
+    Returns:
+        float: The R-squared value.
     """
     actual_values = np.array(actual_values)
     predicted_values = np.array(predicted_values)
@@ -99,8 +154,14 @@ def r_squared(actual_values, predicted_values):
 
 
 def log_memory_and_time(stage: str, path: Path = Path("memory.log")):
-    """
-    Log the current GPU memory usage to a file
+    """Logs the current GPU memory usage and timestamp to a file.
+
+    Args:
+        stage: A string describing the current stage of execution.
+        path: The path to the log file. Defaults to "memory.log".
+
+    Raises:
+        GPUDisabledException: If GPU is not enabled.
     """
     if not GPU_ENABLED:
         raise GPUDisabledException(
@@ -126,10 +187,17 @@ def log_memory_and_time(stage: str, path: Path = Path("memory.log")):
 
 
 def optimal_n_tokens(model: "GPT", config: GPTConfig) -> tuple[int, int]:
-    """
-    Use chinchilla scaling to estimate the compute-optimal number of
-    tokens to train on.
-    See https://arxiv.org/abs/2404.10102 for details
+    """Estimates the compute-optimal number of tokens to train on using Chinchilla scaling.
+
+    Args:
+        model: The GPT model.
+        config: The GPT configuration.
+
+    Returns:
+        tuple: A tuple containing the optimal number of tokens and steps.
+
+    Reference:
+        https://arxiv.org/abs/2404.10102
     """
     # values from the appendix of the paper
     flops = [
@@ -183,8 +251,3 @@ def optimal_n_tokens(model: "GPT", config: GPTConfig) -> tuple[int, int]:
     print(f" - Number of steps: {humanize.intword(n_steps)}")
     print(f" - Tokens per parameters: {tokens_per_parameter:.1f}")
     return n_tokens, n_steps
-
-
-if __name__ == "__main__":
-    config = SmolGPTConfig()
-    optimal_n_tokens(config)
