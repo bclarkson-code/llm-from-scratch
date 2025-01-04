@@ -93,7 +93,8 @@ class Tensor:
             else:
                 dtype = DEFAULT_DTYPE
 
-        self.array = self.array.astype(dtype)
+        if self.array.dtype != dtype:
+            self.array = self.array.astype(dtype)
         self.grad = None
 
         self.requires_grad = requires_grad

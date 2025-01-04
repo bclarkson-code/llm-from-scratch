@@ -216,7 +216,7 @@ class Attention(Op):
         result.args = (self._input,)
         return result
 
-    def to_gpu(self, device: int):
+    def to_gpu(self, device: int = 0):
         """Move this operation to a GPU.
 
         Args:
@@ -252,230 +252,230 @@ class CudnnAttention(Op):
         self.stats = None
         self.output = None
 
-        self.graph_forward = None
+        self.forward_graph = None
         self.graph_backward = None
 
         # used by flash attention for temporary storage
         self._workspace = None
 
-    def backward(self, grad: Tensor):
-        xp = grad.xp
+    def _build_forward_graph(self, query, key, value, output):
+        graph = cudnn.pygraph(
+            io_data_type=cudnn.data_type.HALF,
+            intermediate_data_type=cudnn.data_type.FLOAT,
+            compute_data_type=cudnn.data_type.FLOAT,
+        )
+        B, NH, T, HS = query.shape
+        dim = (B, NH, T, HS)
+        strides = (NH * T * HS, T * HS, HS, 1)  # BNTH layout
+        q = graph.tensor(
+            dim=dim, stride=strides, data_type=cudnn.data_type.HALF
+        )
+        k = graph.tensor(
+            dim=dim, stride=strides, data_type=cudnn.data_type.HALF
+        )
+        v = graph.tensor(
+            dim=dim, stride=strides, data_type=cudnn.data_type.HALF
+        )
+        o = graph.tensor(
+            dim=dim, stride=strides, data_type=cudnn.data_type.HALF
+        )
+        o, stats = graph.sdpa(
+            name="sdpa",
+            q=q,
+            k=k,
+            v=v,
+            is_inference=False,
+            attn_scale=self.attn_scale,
+            use_causal_mask=True,
+        )
 
-        B, T, _ = grad.array.shape
-        NH = self.n_heads
-        C = self.embedding_dim
-        HS = C // NH
+        o.set_output(True).set_dim(dim).set_stride(strides).set_data_type(
+            cudnn.data_type.HALF
+        )
+        stats.set_output(True).set_dim((B, NH, T, 1))
 
-        result = xp.empty((B, T, 3, NH, HS), dtype=xp.float16)
+        graph.validate()
+        graph.build_operation_graph()
+        graph.create_execution_plans(
+            [cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]
+        )
+        graph.check_support()
+        graph.build_plans()
 
-        query = self.qkv[:, :, 0].reshape(B, NH, T, HS)
-        key = self.qkv[:, :, 1].reshape(B, NH, T, HS)
-        value = self.qkv[:, :, 2].reshape(B, NH, T, HS)
+        tensors = {"q": q, "k": k, "v": v, "o": o, "stats": stats}
+        return graph, tensors
 
-        query_result = result[:, :, 0].reshape(B, NH, T, HS)
-        key_result = result[:, :, 1].reshape(B, NH, T, HS)
-        value_result = result[:, :, 2].reshape(B, NH, T, HS)
+    def _build_backward_graph(self):
+        graph = cudnn.create_graph()
 
-        if self.graph_backward is None:
-            self.graph_backward = cudnn.pygraph(
-                io_data_type=cudnn.data_type.HALF,
-                intermediate_data_type=cudnn.data_type.FLOAT,
-                compute_data_type=cudnn.data_type.FLOAT,
-            )
-            q_stride = (NH * HS * T, HS, NH * HS, 1)
-            k_stride = (NH * HS * T, HS, NH * HS, 1)
-            v_stride = (NH * HS * T, HS, NH * HS, 1)
-            grad_stride = (NH * HS * T, HS, NH * HS, 1)
-            o_stride = (NH * HS * T, HS, NH * HS, 1)
-            stats_stride = (NH * T, T, 1, 1)
+        B, NH, T, HS = query.shape
+        q = graph.create_tensor((B, NH, T, HS))
+        k = graph.create_tensor((B, NH, T, HS))
+        v = graph.create_tensor((B, NH, T, HS))
+        o = graph.create_tensor((B, NH, T, HS))
+        do = graph.create_tensor((B, NH, T, HS))
+        stats = graph.create_tensor((B, NH, T, 1))
 
-            self.q_backward = self.graph_backward.tensor(
-                dim=(B, NH, T, HS),
-                stride=q_stride,
-                data_type=cudnn.data_type.HALF,
-            )
-            self.k_backward = self.graph_backward.tensor(
-                dim=(B, NH, T, HS),
-                stride=k_stride,
-                data_type=cudnn.data_type.HALF,
-            )
-            self.v_backward = self.graph_backward.tensor(
-                dim=(B, NH, T, HS),
-                stride=v_stride,
-                data_type=cudnn.data_type.HALF,
-            )
-            self.grad_backward = self.graph_backward.tensor(
-                dim=(B, NH, T, HS),
-                stride=grad_stride,
-                data_type=cudnn.data_type.HALF,
-            )
-            self.o_backward = self.graph_backward.tensor(
-                dim=(B, NH, T, HS),
-                stride=o_stride,
-                data_type=cudnn.data_type.HALF,
-            )
-            self.stats_backward = self.graph_backward.tensor(
-                dim=(B, NH, T, 1),
-                stride=stats_stride,
-                data_type=cudnn.data_type.FLOAT,
-            )
-            # training mode in enabled with is_inference=False
-            # causal mask is enabled
-            (
-                self.q_grad_backward,
-                self.k_grad_backward,
-                self.v_grad_backward,
-            ) = self.graph_backward.sdpa_backward(
-                name="sdpa_backward",
-                q=self.q_backward,
-                k=self.k_backward,
-                v=self.v_backward,
-                o=self.o_backward,
-                dO=self.grad_backward,
-                stats=self.stats_backward,
-                attn_scale=self.attn_scale,
-                use_causal_mask=True,
-            )
-            dim = (B, NH, T, HS)
-            self.q_grad_backward.set_output(True).set_dim(dim).set_stride(
-                q_stride
-            )
-            self.k_grad_backward.set_output(True).set_dim(dim).set_stride(
-                k_stride
-            )
-            self.v_grad_backward.set_output(True).set_dim(dim).set_stride(
-                v_stride
-            )
+        dq, dk, dv = graph.sdpa_backward(
+            name="sdpa_backward",
+            q=q,
+            k=k,
+            v=v,
+            o=o,
+            dO=do,
+            stats=stats,
+            attn_scale=self.attn_scale,
+            use_causal_mask=True,
+        )
 
-            self.graph_backward.validate()
-            self.graph_backward.build_operation_graph()
-            self.graph_backward.create_execution_plans(
-                [cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]
-            )
-            self.graph_backward.check_support()
-            self.graph_backward.build_plans()
-            workspace_size = max(
-                self.graph_forward.get_workspace_size(),
-                self.graph_backward.get_workspace_size(),
-            )
-            self._workspace = xp.empty(workspace_size * 2, dtype=xp.uint8)
+        dq.set_output(True)
+        dk.set_output(True)
+        dv.set_output(True)
 
-        variant_pack_backward = {
-            self.q_backward: query,
-            self.k_backward: key,
-            self.v_backward: value,
-            self.o_backward: self.output,
-            self.grad_backward: grad.array,
-            self.stats_backward: self.stats,
-            self.q_grad_backward: query_result,
-            self.k_grad_backward: key_result,
-            self.v_grad_backward: value_result,
+        graph.compile()
+
+        tensors = {
+            "q": q,
+            "k": k,
+            "v": v,
+            "o": o,
+            "do": do,
+            "stats": stats,
+            "dq": dq,
+            "dk": dk,
+            "dv": dv,
         }
-        for tensor in [query, key, value, self.output, grad.array, self.stats]:
-            assert (
-                tensor.data.ptr % 16 == 0
-            ), f"Tensor {tensor} is not 16-byte aligned"
-        self.graph_backward.execute(variant_pack_backward, self._workspace)
-        xp.cuda.stream.get_current_stream().synchronize()
-        xp.cuda.runtime.deviceSynchronize()
-        breakpoint()
 
-        return Tensor(result)
+        return graph, tensors
 
     def forward(self, tensor: Tensor):
-        xp = tensor.xp
+        import cupy as cp
 
-        assert tensor.is_batched
+        batch_size = 2  # batch size
+        n_heads = 4  # query number of heads
+        embedding_dim = 10  # maximum sequence length
+        head_size = 64  # embedding dimension per head
 
-        B, T, _ = tensor.array.shape
-        NH = self.n_heads
-        C = self.embedding_dim
-        HS = C // NH
+        self.attn_scale = 1 / sqrt(head_size)
+        strides = (
+            embedding_dim * n_heads * head_size,
+            head_size,
+            n_heads * head_size,
+            1,
+        )
+        # Reshape qkv to BS3HD layout
+        self.qkv = tensor.array.reshape(
+            (batch_size, embedding_dim, 3, n_heads, head_size)
+        )
 
-        # tensor is a qkv tensor
-        self.qkv = tensor.array.reshape(B, T, 3, NH, HS)
-        query = self.qkv[:, :, 0].reshape(B, NH, T, HS)
-        key = self.qkv[:, :, 1].reshape(B, NH, T, HS)
-        value = self.qkv[:, :, 2].reshape(B, NH, T, HS)
+        # Transpose to 3BNTHD layout for easier slicing
+        storage = self.qkv.transpose(2, 0, 1, 3, 4)
 
-        self.attn_scale = 1.0 / sqrt(self.n_heads)
-        if self.stats is None:
-            self.stats = xp.empty((B, T, C), dtype=xp.float32)
+        # Create separate views for Q, K, V
+        self.query = storage[0]
+        self.key = storage[1]
+        self.value = storage[2]
 
-        if self.output is None:
-            self.output = xp.empty((B, T, C), dtype=query.dtype)
+        # Reshape to BNTHD layout as expected by cuDNN
+        self.query = self.query.reshape(
+            batch_size, n_heads, embedding_dim, head_size
+        )
+        self.key = self.key.reshape(
+            batch_size, n_heads, embedding_dim, head_size
+        )
+        self.value = self.value.reshape(
+            batch_size, n_heads, embedding_dim, head_size
+        )
 
-        # if it is the first time, compile a computational graph with cudnn
-        if self.graph_forward is None:
-            self.graph_forward = cudnn.pygraph(
-                io_data_type=cudnn.data_type.HALF,
-                intermediate_data_type=cudnn.data_type.FLOAT,
-                compute_data_type=cudnn.data_type.FLOAT,
-            )
-            q_stride = (NH * HS * T, HS, NH * HS, 1)
-            k_stride = (NH * HS * T, HS, NH * HS, 1)
-            v_stride = (NH * HS * T, HS, NH * HS, 1)
+        self.output = cp.empty(
+            (batch_size, n_heads, embedding_dim, head_size),
+            dtype=self.qkv.dtype,
+            order="C",
+        )
+        self.stats = cp.empty(
+            (batch_size, n_heads, embedding_dim, 1),
+            dtype=cp.float32,
+            order="C",
+        )
 
-            self.q_forward = self.graph_forward.tensor(
-                dim=(B, NH, T, HS),
-                stride=q_stride,
-                data_type=cudnn.data_type.HALF,
-            )
-            self.k_forward = self.graph_forward.tensor(
-                dim=(B, NH, T, HS),
-                stride=k_stride,
-                data_type=cudnn.data_type.HALF,
-            )
-            self.v_forward = self.graph_forward.tensor(
-                dim=(B, NH, T, HS),
-                stride=v_stride,
-                data_type=cudnn.data_type.HALF,
-            )
-            # training mode in enabled with is_inference=False
-            # causal mask is enabled
-            self.o_forward, self.stats_forward = self.graph_forward.sdpa(
-                name="sdpa",
-                q=self.q_forward,
-                k=self.k_forward,
-                v=self.v_forward,
-                is_inference=False,
-                attn_scale=self.attn_scale,
-                use_causal_mask=True,
+        if self.forward_graph is None:
+            self.forward_graph, self.forward_tensors = (
+                self._build_forward_graph(
+                    self.query, self.key, self.value, self.output
+                )
             )
 
-            o_stride = (NH * HS * T, HS, NH * HS, 1)
-            self.o_forward.set_output(True).set_dim([B, NH, T, HS]).set_stride(
-                o_stride
-            )
-            self.stats_forward.set_output(True).set_dim(
-                [B, NH, T, 1]
-            ).set_stride([NH * T, T, 1, 1]).set_data_type(
-                cudnn.data_type.FLOAT
-            )
+        workspace_size = self.forward_graph.get_workspace_size()
+        workspace = cp.empty((workspace_size,), dtype=cp.uint8)
 
-            self.graph_forward.validate()
-            self.graph_forward.build_operation_graph()
-            self.graph_forward.create_execution_plans(
-                [cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK]
-            )
-            self.graph_forward.check_support()
-            self.graph_forward.build_plans()
-            workspace_size = self.graph_forward.get_workspace_size()
-            if (
-                self._workspace is None
-                or self._workspace.size() < workspace_size
-            ):
-                self._workspace = xp.empty(workspace_size, dtype=xp.uint8)
+        self.forward_graph.execute(
+            {
+                self.forward_tensors["q"]: self.query,
+                self.forward_tensors["k"]: self.key,
+                self.forward_tensors["v"]: self.value,
+                self.forward_tensors["o"]: self.output,
+                self.forward_tensors["stats"]: self.stats,
+            },
+            workspace,
+        )
 
-        variant_pack_forward = {
-            self.q_forward: query,
-            self.k_forward: key,
-            self.v_forward: value,
-            self.o_forward: self.output,
-            self.stats_forward: self.stats,
-        }
-        self.graph_forward.execute(variant_pack_forward, self._workspace)
-        xp.cuda.stream.get_current_stream().synchronize()
+        # Add debugging output
+        print(f"Output shape: {self.output.shape}")
+        print(f"Output dtype: {self.output.dtype}")
+        print(
+            f"Output memory info: {self.output.data.mem.ptr}, {self.output.data.mem.size}"
+        )
+
+        # Reshape o to match input shape
+        try:
+            self.output = self.output.transpose(0, 2, 1, 3).reshape(
+                batch_size, embedding_dim, n_heads * head_size
+            )
+        except Exception as e:
+            print(f"Error during output reshaping: {e}")
+            raise
+        return Tensor(
+            self.output,
+            back_fns=(self.backward,),
+            args=(self.qkv,),
+            is_batched=True,
+            dtype=cp.float16,
+        )
+
+    def backward(self, dout, q, k, v, o, stats):
+        import cupy as cp
+
+        B, T, NH_HS = dout.shape
+        assert NH_HS == NH * HS, "dout shape mismatch"
+
+        # Reshape dout to match SDPA output shape
+        do = dout.reshape(B, T, NH, HS).transpose(0, 2, 1, 3)
+
+        dq = cp.empty_like(q)
+        dk = cp.empty_like(k)
+        dv = cp.empty_like(v)
+
+        workspace_size = self.backward_graph.get_workspace_size()
+        workspace = cp.empty((workspace_size,), dtype=cp.uint8)
+
+        self.backward_graph.execute(
+            {
+                self.backward_tensors["q"]: q,
+                self.backward_tensors["k"]: k,
+                self.backward_tensors["v"]: v,
+                self.backward_tensors["o"]: o,
+                self.backward_tensors["do"]: do,
+                self.backward_tensors["stats"]: stats,
+                self.backward_tensors["dq"]: dq,
+                self.backward_tensors["dk"]: dk,
+                self.backward_tensors["dv"]: dv,
+            },
+            workspace,
+        )
+
+        # Combine dq, dk, dv into a single array
+        dqkv = cp.stack([dq, dk, dv], axis=2)
+        dqkv = dqkv.transpose(0, 2, 3, 1, 4).reshape(B, T, 3 * NH * HS)
 
         return Tensor(
             self.output,

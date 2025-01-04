@@ -195,6 +195,7 @@ class AdamW(Optimiser):
         betas=(0.9, 0.999),
         eps=1e-6,
         weight_decay=0.01,
+        logger=LOGGER,
     ):
         """
         Initialise the AdamW optimiser.
@@ -210,6 +211,7 @@ class AdamW(Optimiser):
         self.eps = eps
         self.weight_decay = weight_decay
         self.timestep = 1
+        self.logger = logger
 
         self.momentum = {}
         self.square_momentum = {}

@@ -21,7 +21,7 @@ class TricycleContext:
     """
 
     use_mixed_precision: bool = False
-    loss_scale_factor: int = 128
+    loss_scale_factor: int = 256
 
 
 # Global instance of TricycleContext

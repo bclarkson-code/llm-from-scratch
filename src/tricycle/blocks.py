@@ -10,7 +10,7 @@ from typing import Literal
 import numpy as np
 
 from tricycle.activation import GLU, GeLU, ReLU, Swish
-from tricycle.attention import Attention
+from tricycle.attention import Attention, CudnnAttention
 from tricycle.initialisers import init_xavier
 from tricycle.layers import (  # noqa E501
     Dense,
@@ -89,6 +89,7 @@ class MultiHeadSelfAttention(Layer):
         context_window: int,
         residual_dropout_prob: float = 0.0,
         initialiser=init_xavier,
+        use_cudnn=True,
     ):
         """
         Initialize the MultiHeadSelfAttention layer.
@@ -129,11 +130,18 @@ class MultiHeadSelfAttention(Layer):
             self.out_projection,
         ]
 
-        self.attention = Attention(
-            embedding_dim=embedding_dim,
-            n_heads=n_heads,
-            context_window=context_window,
-        )
+        if use_cudnn:
+            self.attention = CudnnAttention(
+                embedding_dim=embedding_dim,
+                n_heads=n_heads,
+                context_window=context_window,
+            )
+        else:
+            self.attention = Attention(
+                embedding_dim=embedding_dim,
+                n_heads=n_heads,
+                context_window=context_window,
+            )
 
     def forward(self, tensor: Tensor):
         """
