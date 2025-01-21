@@ -3,7 +3,7 @@ name = "tricycle"
 version = "0.1.0"
 description = "A Deep Learning library you can actually understand"
 authors = [
-    { name = "benedictclarkson1", email = "benedictclarkson1@gmail.com" }
+    { name = "benedictclarkson1", email = "benedictclarkson1@gmail.com" },
 ]
 license = { text = "MIT" }
 readme = "README.md"
@@ -18,3 +18,41 @@ line-length = 79
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.pixi.project]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.pypi-dependencies]
+tricycle = { path = ".", editable = true }
+richbench = "*"
+humanize = "*"
+tqdm = "*"
+ruff = "*"
+
+[tool.pixi.tasks]
+clean = "rm -rf build"
+configure = { depends-on = ["clean"], cmd = "cmake -B build -G Ninja" }
+build = { depends-on = ["configure"], cmd = "cmake --build build" }
+temp = { depends-on = ["build"], cmd = "python temp.py" }
+ruff = "ruff"
+
+[tool.pixi.dependencies]
+python = ">=3.10"
+cuda-toolkit = "12.6.*"
+cudnn = "9.3.*"
+python-cudnn-frontend = "*"
+cmake = "*"
+ninja = "*"
+cupy = "*"
+meson = "*"                 # Helpful for ninja configuration
+ccache = "*"                # Speed up rebuilds
+numba = ">=0.60.0,<0.61"
+clang-format = "*"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }

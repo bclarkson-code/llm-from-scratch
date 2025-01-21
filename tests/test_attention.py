@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from tricycle.attention import Attention, build_mask
+from tricycle.attention import Attention, CudnnAttention, build_mask
 from tricycle.blocks import MultiHeadSelfAttention
 from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.einsum import Einsum
@@ -305,4 +305,79 @@ def test_attention_block():
 
     assert tricycle_in_weights.close_to(
         c_attn.weight.grad.T.numpy(), rtol=1e-2, atol=1e-4
+    )
+
+
+def generate_causal_mask(seq_length):
+    import torch
+
+    # Create a causal mask
+    mask = torch.triu(torch.ones(seq_length, seq_length), diagonal=1).bool()
+    return mask
+
+
+def test_cudnn_attention_vs_pytorch():
+    import cupy as cp
+    import torch
+
+    # Set random seed for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
+    cp.random.seed(42)
+
+    # Parameters
+    batch_size = 2
+    embedding_dim = 10
+    n_heads = 4
+    head_size = 64
+
+    # Create input tensor
+    input_np = np.random.randn(
+        batch_size, embedding_dim, head_size * 3 * n_heads
+    ).astype(np.float16)
+    input_tricycle = Tensor(cp.array(input_np), dtype=cp.float16).to_gpu()
+    input_torch = torch.from_numpy(input_np).to(torch.float16).cuda()
+
+    # Create attention modules
+    cudnn_attention = CudnnAttention(
+        embedding_dim=head_size, n_heads=n_heads, context_window=embedding_dim
+    )
+    # Forward pass for CudnnAttention
+    output_tricycle = cudnn_attention.forward(input_tricycle)
+
+    torch_attention = torch.nn.MultiheadAttention(
+        head_size, n_heads, batch_first=True, dtype=torch.float16
+    ).cuda()
+
+    # Generate causal mask
+    causal_mask = generate_causal_mask(embedding_dim).cuda()
+
+    # Forward pass for PyTorch
+    q, k, v = input_torch.chunk(3, dim=-1)
+    output_torch, _ = torch_attention(
+        q, k, v, attn_mask=causal_mask, is_causal=True
+    )
+    # Compare outputs
+    breakpoint()
+    output_tricycle_np = output_tricycle.array.get()
+    output_torch_np = output_torch.cpu().detach().numpy()
+
+    # Calculate mean absolute error
+    mae = np.mean(np.abs(output_tricycle_np - output_torch_np))
+    print(f"Mean Absolute Error: {mae}")
+
+    # Calculate relative error
+    relative_error = np.mean(
+        np.abs((output_tricycle_np - output_torch_np) / output_torch_np)
+    )
+    print(f"Mean Relative Error: {relative_error}")
+
+    # Check if the outputs are close enough
+    tolerance = 1e-2  # Adjust this value based on your requirements
+    assert (
+        mae < tolerance
+    ), f"Mean Absolute Error ({mae}) exceeds tolerance ({tolerance})"
+
+    print(
+        "Test passed: CudnnAttention output is close to PyTorch's MultiheadAttention output"
     )

@@ -1,0 +1,17 @@
+numpy
+humanize
+tqdm
+mlflow
+psutil
+numba
+tiktoken
+datasets
+cupy-cuda12x  # Note: specifying CUDA 12.x version
+pynvml
+scikit-learn
+pytest
+hypothesis
+torch==2 # we use this to test correctness, not to cheat
+pre-commit
+nvidia_cudnn_frontend
+-e .

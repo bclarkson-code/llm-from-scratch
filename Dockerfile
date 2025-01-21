@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     git \
     curl \
+    vim \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -21,8 +22,17 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY requirements.txt .
 
-# Install Python dependencies using uv
-RUN pip install uv && uv pip install --system --no-cache -r requirements.txt
+ADD https://astral.sh/uv/install.sh /uv-installer.sh
 
+# Run the installer then remove it
+RUN sh /uv-installer.sh && rm /uv-installer.sh
+
+# Ensure the installed binary is on the `PATH`
+ENV PATH="/root/.local/bin/:$PATH"
+
+RUN uv venv /opt/venv
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN uv pip install . -r  requirements.txt --no-cache
 # Use bash as the default command
 CMD ["/bin/bash"]

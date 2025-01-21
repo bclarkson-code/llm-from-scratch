@@ -1,0 +1,27 @@
+Traceback (most recent call last):
+  File "/home/ben/Documents/Tricycle/temp.py", line 193, in <module>
+    qkv_reconstructed = cp.concatenate(
+  File "/home/ben/mambaforge/envs/tricycle/lib/python3.10/site-packages/cupy/_manipulation/join.py", line 60, in concatenate
+    return _core.concatenate_method(tup, axis, out, dtype, casting)
+  File "cupy/_core/_routines_manipulation.pyx", line 586, in cupy._core._routines_manipulation.concatenate_method
+  File "cupy/_core/_routines_manipulation.pyx", line 665, in cupy._core._routines_manipulation.concatenate_method
+  File "cupy/_core/_routines_manipulation.pyx", line 704, in cupy._core._routines_manipulation._concatenate
+  File "cupy/_core/_kernel.pyx", line 1375, in cupy._core._kernel.ufunc.__call__
+  File "cupy/_core/_kernel.pyx", line 1402, in cupy._core._kernel.ufunc._get_ufunc_kernel
+  File "cupy/_core/_kernel.pyx", line 1082, in cupy._core._kernel._get_ufunc_kernel
+  File "cupy/_core/_kernel.pyx", line 94, in cupy._core._kernel._get_simple_elementwise_kernel
+  File "cupy/_core/_kernel.pyx", line 82, in cupy._core._kernel._get_simple_elementwise_kernel_from_code
+  File "cupy/_core/core.pyx", line 2258, in cupy._core.core.compile_with_cache
+  File "/home/ben/mambaforge/envs/tricycle/lib/python3.10/site-packages/cupy/cuda/compiler.py", line 484, in _compile_module_with_cache
+    return _compile_with_cache_cuda(
+  File "/home/ben/mambaforge/envs/tricycle/lib/python3.10/site-packages/cupy/cuda/compiler.py", line 606, in _compile_with_cache_cuda
+    mod.load(cubin)
+  File "cupy/cuda/function.pyx", line 263, in cupy.cuda.function.Module.load
+  File "cupy/cuda/function.pyx", line 265, in cupy.cuda.function.Module.load
+  File "cupy_backends/cuda/api/driver.pyx", line 226, in cupy_backends.cuda.api.driver.moduleLoadData
+  File "cupy_backends/cuda/api/driver.pyx", line 63, in cupy_backends.cuda.api.driver.check_status
+cupy_backends.cuda.api.driver.CUDADriverError: CUDA_ERROR_MISALIGNED_ADDRESS: misaligned address
+Traceback (most recent call last):
+  File "cupy_backends/cuda/api/driver.pyx", line 234, in cupy_backends.cuda.api.driver.moduleUnload
+  File "cupy_backends/cuda/api/driver.pyx", line 63, in cupy_backends.cuda.api.driver.check_status
+cupy_backends.cuda.api.driver.CUDADriverError: CUDA_ERROR_MISALIGNED_ADDRESS: misaligned address

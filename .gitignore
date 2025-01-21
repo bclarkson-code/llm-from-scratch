@@ -37,3 +37,8 @@ datasets/fineweb
 
 # docs
 docs/_build/
+build
+
+# pixi environments
+.pixi
+*.egg-info
