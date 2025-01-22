@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "CUDA",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/home/ben/Documents/Tricycle/.pixi/envs/default/include",
+                "/home/ben/Documents/Tricycle/.pixi/envs/default/targets/x86_64-linux/include",
+                "/home/ben/Documents/Tricycle/.pixi/envs/default/targets/x86_64-linux/include/cuda"
+            ],
+            "compilerPath": "/home/ben/Documents/Tricycle/.pixi/envs/default/bin/x86_64-conda-linux-gnu-g++",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "${default}",
+            "defines": [
+                "__CUDACC__",
+                "CUDA_VERSION=12000",
+                "__CUDA_ARCH__=860"
+            ]
+        }
+    ],
+    "version": 4
+}

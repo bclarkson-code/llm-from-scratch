@@ -2,7 +2,7 @@
 #define CUDA_COMMON_H
 #include <cuda_runtime.h>
 
-typedef float floatX;
+typedef half floatX;
 #define WARP_SIZE 32U
 #define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
 

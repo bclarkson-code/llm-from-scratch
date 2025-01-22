@@ -132,9 +132,11 @@ class MultiHeadSelfAttention(Layer):
 
         if use_cudnn:
             self.attention = CudnnAttention(
+                batch_size=128,
                 embedding_dim=embedding_dim,
                 n_heads=n_heads,
                 context_window=context_window,
+                shared={},
             )
         else:
             self.attention = Attention(

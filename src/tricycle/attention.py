@@ -6,12 +6,16 @@ building attention masks and the main Attention class for performing
 multi-head attention operations.
 """
 
+import ctypes
 from math import sqrt
+from pathlib import Path
 
+import cupy as cp
 import numpy as np
 
 from tricycle import GPU_ENABLED
 from tricycle.context import TRICYCLE_CONTEXT
+from tricycle.exceptions import GPUDisabledException
 from tricycle.ops import Op
 from tricycle.tensor import Tensor
 
@@ -440,3 +444,168 @@ class CudaAttention(Op):
             import cupy as cp
 
             self.mask = cp.asnumpy(self.mask)
+
+
+class CudnnAttention(Op):
+    lib_path: Path = (
+        Path(__file__).parent.parent.parent / "build/attention_cudnn.so"
+    )
+    batch_size: int
+    context_window: int
+    embedding_dim: int
+    n_heads: int
+
+    def __init__(
+        self,
+        batch_size: int,
+        context_window: int,
+        embedding_dim: int,
+        n_heads: int,
+        shared: dict[str, cp.ndarray],
+    ):
+        if not GPU_ENABLED:
+            raise GPUDisabledException("Cannot use CUDNN without a GPU")
+        # if not TRICYCLE_CONTEXT.use_mixed_precision:
+        #     raise NotImplementedError(
+        #         "CUDNN attention is only supported with FP16"
+        #     )
+        self.batch_size = batch_size
+        self.context_window = context_window
+        self.embedding_dim = embedding_dim
+        self.n_heads = n_heads
+        self.shared = shared
+
+        self.initialise_kernels()
+
+        input_shape = (
+            self.batch_size,
+            self.context_window,
+            3 * self.embedding_dim,
+        )
+        self.input = cp.zeros(input_shape, dtype=cp.float16)
+
+        stats_shape = (self.batch_size, self.n_heads, self.context_window)
+        self.stats = cp.zeros(stats_shape, dtype=cp.float32)
+
+        output_shape = (
+            self.batch_size,
+            self.context_window,
+            self.embedding_dim,
+        )
+        self.output = cp.zeros(output_shape, dtype=cp.float16)
+
+        if "attention_input_grad" not in shared:
+            # llmc has a 4 instead of a 3. it is unclear why. 3 seems to work fine for now
+            input_grad_shape = (
+                self.batch_size,
+                self.context_window,
+                3 * self.embedding_dim,
+            )
+            self.input_grad = cp.zeros(input_grad_shape, dtype=cp.float16)
+            shared["attention_input_grad"] = self.input_grad
+        else:
+            self.input_grad = shared["attention_input_grad"]
+
+        if "attention_output_grad" not in shared:
+            output_grad_shape = (
+                self.batch_size,
+                self.context_window,
+                self.embedding_dim,
+            )
+            self.output_grad = cp.zeros(output_grad_shape, dtype=cp.float16)
+            shared["attention_output_grad"] = self.output_grad
+        else:
+            self.output_grad = shared["attention_output_grad"]
+
+    def initialise_kernels(self):
+        # Load the c functions
+        lib = ctypes.CDLL(str(self.lib_path))
+        self.stream = cp.cuda.get_current_stream()
+
+        # initialise cuda/cublas/cudnn
+        init = lib.initialize_cuda
+        init.argtypes = [ctypes.c_void_p]
+        init.restype = None
+        init(ctypes.c_void_p(self.stream.ptr))
+
+        # Define argument types for the kernels
+        forward_args = [
+            ctypes.c_void_p,  # float* out
+            ctypes.c_void_p,  # float* stats
+            ctypes.c_void_p,  # float* inp
+            ctypes.c_int,  # int B
+            ctypes.c_int,  # int T
+            ctypes.c_int,  # int NH
+            ctypes.c_int,  # int C
+            ctypes.c_void_p,  # cudaStream_t stream
+        ]
+        self.forward_kernel = lib.attention_forward_cudnn
+        self.forward_kernel.argtypes = forward_args
+        self.forward_kernel.restype = None
+
+        backward_args = [
+            ctypes.c_void_p,  # float* dqkvr
+            ctypes.c_void_p,  # float* dout
+            ctypes.c_void_p,  # float* qkvr
+            ctypes.c_void_p,  # float* o
+            ctypes.c_void_p,  # float* stats
+            ctypes.c_int,  # int B
+            ctypes.c_int,  # int T
+            ctypes.c_int,  # int NH
+            ctypes.c_int,  # int C
+            ctypes.c_void_p,  # cudaStream_t stream
+        ]
+        self.backward_kernel = lib.attention_backward_cudnn
+        self.backward_kernel.argtypes = backward_args
+        self.backward_kernel.restype = None
+
+    def forward(self, tensor: Tensor):
+        """
+        Attention with a custom cuda kernel
+        """
+        if tensor.xp is not cp:
+            raise ValueError("Cannot use numpy arrays with CUDNN")
+
+        self.input = tensor
+
+        self.forward_kernel(
+            ctypes.c_void_p(self.output.data.ptr),  # float* out
+            ctypes.c_void_p(self.stats.data.ptr),  # float* stats
+            ctypes.c_void_p(self.input.array.data.ptr),  # float* inp
+            ctypes.c_int(self.batch_size),  # int B
+            ctypes.c_int(self.context_window),  # int T
+            ctypes.c_int(self.n_heads),  # int NH
+            ctypes.c_int(self.embedding_dim),  # int C
+            ctypes.c_void_p(self.stream.ptr),
+        )
+
+        result = Tensor(self.output, is_batched=True)
+        result.back_fns = (self.backward,)
+        result.args = (self.input,)
+        return result
+
+    def backward(self, grad: Tensor):
+        """
+        Attention with a custom cuda kernel
+        """
+        if grad.xp is not cp:
+            raise ValueError("Cannot use numpy arrays with CUDNN")
+        self.output_grad = grad
+
+        self.backward_kernel(
+            ctypes.c_void_p(self.input_grad.data.ptr),  # float* dqkvr
+            ctypes.c_void_p(self.output_grad.array.data.ptr),  # float* dout
+            ctypes.c_void_p(self.input.array.data.ptr),  # float* qkvr
+            ctypes.c_void_p(self.output.data.ptr),  # float* o
+            ctypes.c_void_p(self.stats.data.ptr),  # float* stats
+            ctypes.c_int(self.batch_size),  # int B
+            ctypes.c_int(self.context_window),  # int T
+            ctypes.c_int(self.n_heads),  # int NH
+            ctypes.c_int(self.embedding_dim),  # int C
+            ctypes.c_void_p(self.stream.ptr),  # cudaStream_t stream
+        )
+
+        return Tensor(self.input_grad)
+
+    def to_gpu(self, *_):
+        pass

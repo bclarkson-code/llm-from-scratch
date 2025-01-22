@@ -7,13 +7,13 @@ from tricycle.tensor import Tensor
 from tricycle.utils import UseMixedPrecision
 
 N_LOOPS = 100
-# INPUT_SHAPE = (2, 64, 16)
-# OUTPUT_SHAPE = 8
-# N_HEADS = 2
+INPUT_SHAPE = (2, 64, 16)
+OUTPUT_SHAPE = 8
+N_HEADS = 2
 
-INPUT_SHAPE = (16, 1024, 768)
-OUTPUT_SHAPE = 768
-N_HEADS = 12
+# INPUT_SHAPE = (16, 1024, 768)
+# OUTPUT_SHAPE = 768
+# N_HEADS = 12
 
 
 def bench_vanilla_relu():
@@ -97,7 +97,7 @@ def bench_vanilla_attention():
             output.backward()
 
 
-def bench_cuda_attention():
+def bench_cudnn_attention():
     with UseMixedPrecision():
         np.random.seed(0)
         B, T, C = INPUT_SHAPE
@@ -107,10 +107,14 @@ def bench_cuda_attention():
             is_batched=True,
         )
         layer = CudnnAttention(
-            embedding_dim=C, n_heads=N_HEADS, context_window=T
+            batch_size=B,
+            embedding_dim=C,
+            n_heads=N_HEADS,
+            context_window=T,
+            shared={},
         )
         tensor.to_gpu()
-        layer.to_gpu()
+        # layer.to_gpu()
         for _ in range(N_LOOPS):
             output = layer(tensor)
             output.backward()
@@ -173,45 +177,60 @@ def test_cudnn_attention_vs_pytorch():
     cp.random.seed(42)
 
     # Parameters
-    batch_size = 2
-    embedding_dim = 10
-    n_heads = 4
-    head_size = 64
+    B, T, C = INPUT_SHAPE
+    batch_size = B
+    embedding_dim = C
+    context_window = T
+    n_heads = N_HEADS
 
     # Create input tensor
     input_np = np.random.randn(
-        batch_size, embedding_dim, head_size * 3 * n_heads
+        batch_size, context_window, 3 * embedding_dim
     ).astype(np.float16)
     input_tricycle = Tensor(cp.array(input_np), dtype=cp.float16).to_gpu()
     input_torch = torch.from_numpy(input_np).to(torch.float16).cuda()
 
     # Create attention modules
     cudnn_attention = CudnnAttention(
-        embedding_dim=head_size, n_heads=n_heads, context_window=embedding_dim
+        batch_size=batch_size,
+        embedding_dim=embedding_dim,
+        n_heads=N_HEADS,
+        context_window=T,
+        shared={},
     )
+
     # Forward pass for CudnnAttention
-    output_tricycle = cudnn_attention.forward(input_tricycle)
+    with UseMixedPrecision():
+        output_tricycle = cudnn_attention.forward(input_tricycle)
 
     torch_attention = torch.nn.MultiheadAttention(
-        head_size, n_heads, batch_first=True, dtype=torch.float16
+        embed_dim=embedding_dim,
+        num_heads=n_heads,
+        batch_first=True,
+        dtype=torch.float16,
+        # bias=False,
     ).cuda()
 
     # Generate causal mask
-    causal_mask = generate_causal_mask(embedding_dim).cuda()
+    causal_mask = generate_causal_mask(context_window).cuda()
 
     # Forward pass for PyTorch
+    mae = np.mean(
+        np.abs(input_tricycle.array.get() - input_torch.cpu().detach().numpy())
+    )
+    print(f"Input Mean Absolute Error: {mae}")
     q, k, v = input_torch.chunk(3, dim=-1)
     output_torch, _ = torch_attention(
         q, k, v, attn_mask=causal_mask, is_causal=True
     )
     # Compare outputs
-    breakpoint()
     output_tricycle_np = output_tricycle.array.get()
     output_torch_np = output_torch.cpu().detach().numpy()
 
     # Calculate mean absolute error
     mae = np.mean(np.abs(output_tricycle_np - output_torch_np))
-    print(f"Mean Absolute Error: {mae}")
+    print(f"Output Mean Absolute Error: {mae}")
+    breakpoint()
 
     # Calculate relative error
     relative_error = np.mean(
@@ -236,7 +255,7 @@ __benchmarks__ = [
     # (bench_vanilla_dense, bench_cuda_dense, "vanilla vs cublas matmul"),
     (
         bench_vanilla_attention,
-        bench_cuda_attention,
+        bench_cudnn_attention,
         "vanilla vs cublas attention",
     ),
     # (bench_vanilla_dense, bench_cuda_dense, "vanilla vs cublas matmul"),

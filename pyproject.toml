@@ -8,6 +8,7 @@ authors = [
 license = { text = "MIT" }
 readme = "README.md"
 
+
 [tool.isort]
 profile = "black"
 line_length = 79
@@ -26,9 +27,12 @@ platforms = ["linux-64"]
 [tool.pixi.pypi-dependencies]
 tricycle = { path = ".", editable = true }
 richbench = "*"
+torch = "*"
 humanize = "*"
 tqdm = "*"
 ruff = "*"
+tiktoken = "*"
+datasets = "*"
 
 [tool.pixi.tasks]
 clean = "rm -rf build"
@@ -41,6 +45,7 @@ ruff = "ruff"
 python = ">=3.10"
 cuda-toolkit = "12.6.*"
 cudnn = "9.3.*"
+cuda-nvcc = "*"
 python-cudnn-frontend = "*"
 cmake = "*"
 ninja = "*"

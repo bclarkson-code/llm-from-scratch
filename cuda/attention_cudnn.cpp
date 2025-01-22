@@ -258,12 +258,22 @@ auto lookup_cache_or_build_graph_bwd(int B, int NH, int T, int HS) {
   return graph;
 }
 
+void create_cudnn() { cuDNNCheck(cudnnCreate(&cudnn_handle)); }
+
+void destroy_cudnn() {
+  if (cudnn_workspace != NULL) {
+    cudaCheck(cudaFree(cudnn_workspace));
+  }
+  cuDNNCheck(cudnnDestroy(cudnn_handle));
+}
+
 extern "C" {
 
 void initialize_cuda() {
   static bool initialized = false;
   if (!initialized) {
     setup_main();
+    create_cudnn();
     initialized = true;
   }
 }
@@ -344,14 +354,5 @@ void attention_backward_cudnn(floatX* dqkvr,  // output
   cuDNNCheck(cudnnSetStream(cudnn_handle, stream));
   checkCudnnFE(graph->execute(cudnn_handle, variant_pack, cudnn_workspace));
   cudaCheck(cudaGetLastError());
-}
-
-void create_cudnn() { cuDNNCheck(cudnnCreate(&cudnn_handle)); }
-
-void destroy_cudnn() {
-  if (cudnn_workspace != NULL) {
-    cudaCheck(cudaFree(cudnn_workspace));
-  }
-  cuDNNCheck(cudnnDestroy(cudnn_handle));
 }
 }
