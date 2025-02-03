@@ -9,5 +9,6 @@
         "*.cu": "cpp",
         "*.cuh": "cpp"
     },
-    "vim.smartRelativeLine": true
+    "vim.smartRelativeLine": true,
+    "vim.useSystemClipboard": true
 }

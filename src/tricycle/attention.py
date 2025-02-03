@@ -567,6 +567,10 @@ class CudnnAttention(Op):
             raise ValueError("Cannot use numpy arrays with CUDNN")
 
         self.input = tensor
+        input_data = tensor.array.reshape(
+            self.batch_size, self.context_window, 3, self.n_heads, -1
+        )
+        input_data = input_data.transpose(0, 1, 3, 2, 4)
 
         self.forward_kernel(
             ctypes.c_void_p(self.output.data.ptr),  # float* out

@@ -272,7 +272,7 @@ extern "C" {
 void initialize_cuda() {
   static bool initialized = false;
   if (!initialized) {
-    setup_main();
+    // setup_main();
     create_cudnn();
     initialized = true;
   }

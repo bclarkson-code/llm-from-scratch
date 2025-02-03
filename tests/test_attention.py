@@ -1,12 +1,15 @@
 import numpy as np
 import torch
 
+from tricycle import GPU_ENABLED
 from tricycle.attention import Attention, CudnnAttention, build_mask
 from tricycle.blocks import MultiHeadSelfAttention
 from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.einsum import Einsum
+from tricycle.exceptions import GPUDisabledException
 from tricycle.functions import Softmax
 from tricycle.tensor import DEFAULT_DTYPE, Tensor
+from tricycle.utils import UseMixedPrecision
 
 TORCH_DTYPE = (
     torch.float16 if TRICYCLE_CONTEXT.use_mixed_precision else torch.float32
@@ -317,8 +320,16 @@ def generate_causal_mask(seq_length):
 
 
 def test_cudnn_attention_vs_pytorch():
+    if not GPU_ENABLED:
+        raise GPUDisabledException(
+            "Cannot run test test_cudnn_attention_vs_pytorch if GPU is not available"
+        )
     import cupy as cp
     import torch
+
+    INPUT_SHAPE = (2, 64, 16)
+    N_HEADS = 2
+    tolerance = 1e-4
 
     # Set random seed for reproducibility
     torch.manual_seed(42)
@@ -326,58 +337,89 @@ def test_cudnn_attention_vs_pytorch():
     cp.random.seed(42)
 
     # Parameters
-    batch_size = 2
-    embedding_dim = 10
-    n_heads = 4
-    head_size = 64
+    B, T, C = INPUT_SHAPE
+    batch_size = B
+    embedding_dim = C
+    context_window = T
+    n_heads = N_HEADS
+    NH = n_heads
+    head_size = embedding_dim // n_heads
+    HS = C // NH
 
     # Create input tensor
     input_np = np.random.randn(
-        batch_size, embedding_dim, head_size * 3 * n_heads
+        batch_size, context_window, 3 * embedding_dim
     ).astype(np.float16)
-    input_tricycle = Tensor(cp.array(input_np), dtype=cp.float16).to_gpu()
+
+    input_tricycle = cp.array(input_np)
+    print("Pre-reshape Q:", input_tricycle[:, :, :C].get())
+    print("Pre-reshape K:", input_tricycle[:, :, C : 2 * C].get())
+    print("Pre-reshape V:", input_tricycle[:, :, 2 * C :].get())
+    input_tricycle = cp.ascontiguousarray(input_tricycle)
+    input_tricycle = input_tricycle.reshape(
+        (batch_size, context_window, 3, n_heads, head_size)
+    )
+    breakpoint()
+    input_tricycle = Tensor(input_tricycle, dtype=cp.float16).to_gpu()
+
     input_torch = torch.from_numpy(input_np).to(torch.float16).cuda()
 
-    # Create attention modules
+    # error = np.mean(
+    #     np.abs(input_tricycle.array.get() - input_torch.cpu().detach().numpy())
+    #     / input_torch.cpu().detach().numpy()
+    # )
+    # assert error < tolerance, f"Attention input are different: {error=}"
+
     cudnn_attention = CudnnAttention(
-        embedding_dim=head_size, n_heads=n_heads, context_window=embedding_dim
+        batch_size=batch_size,
+        embedding_dim=embedding_dim,
+        n_heads=N_HEADS,
+        context_window=T,
+        shared={},
     )
-    # Forward pass for CudnnAttention
-    output_tricycle = cudnn_attention.forward(input_tricycle)
 
     torch_attention = torch.nn.MultiheadAttention(
-        head_size, n_heads, batch_first=True, dtype=torch.float16
+        embed_dim=embedding_dim,
+        num_heads=n_heads,
+        batch_first=True,
+        dtype=torch.float16,
     ).cuda()
 
-    # Generate causal mask
-    causal_mask = generate_causal_mask(embedding_dim).cuda()
+    # Tricycle forward pass
+    with UseMixedPrecision():
+        output_tricycle = cudnn_attention.forward(input_tricycle)
+        output_tricycle = output_tricycle.array.reshape(
+            batch_size, context_window, n_heads, -1
+        )
+        output_tricycle = output_tricycle.transpose(0, 2, 1, 3).reshape(
+            batch_size, context_window, embedding_dim
+        )
+        output_tricycle = Tensor(
+            output_tricycle, dtype=cp.float16, is_batched=True
+        )
 
-    # Forward pass for PyTorch
+    # Pytorch forward pass
+    causal_mask = generate_causal_mask(context_window).cuda()
     q, k, v = input_torch.chunk(3, dim=-1)
+    print("PyTorch Q:", q[0, 0, :3])
+    print("PyTorch K:", k[0, 0, :3])
+    print("PyTorch V:", v[0, 0, :3])
     output_torch, _ = torch_attention(
         q, k, v, attn_mask=causal_mask, is_causal=True
     )
+
     # Compare outputs
-    breakpoint()
     output_tricycle_np = output_tricycle.array.get()
     output_torch_np = output_torch.cpu().detach().numpy()
-
-    # Calculate mean absolute error
-    mae = np.mean(np.abs(output_tricycle_np - output_torch_np))
-    print(f"Mean Absolute Error: {mae}")
-
-    # Calculate relative error
-    relative_error = np.mean(
-        np.abs((output_tricycle_np - output_torch_np) / output_torch_np)
+    error = np.mean(
+        np.abs(output_tricycle_np - output_torch_np) / output_torch_np
     )
-    print(f"Mean Relative Error: {relative_error}")
-
-    # Check if the outputs are close enough
-    tolerance = 1e-2  # Adjust this value based on your requirements
+    print(f"{ output_tricycle_np.mean() }")
+    print(f"{ output_torch_np.mean() }")
     assert (
-        mae < tolerance
-    ), f"Mean Absolute Error ({mae}) exceeds tolerance ({tolerance})"
+        error < tolerance
+    ), f"Outputs are significantly different: {error=}. {output_tricycle_np[0][0]=}, {output_torch_np[0][0]=}"
 
-    print(
-        "Test passed: CudnnAttention output is close to PyTorch's MultiheadAttention output"
-    )
+
+if __name__ == "__main__":
+    test_cudnn_attention_vs_pytorch()

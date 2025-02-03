@@ -33,12 +33,15 @@ tqdm = "*"
 ruff = "*"
 tiktoken = "*"
 datasets = "*"
+pytest = "*"
 
 [tool.pixi.tasks]
 clean = "rm -rf build"
-configure = { depends-on = ["clean"], cmd = "cmake -B build -G Ninja" }
-build = { depends-on = ["configure"], cmd = "cmake --build build" }
-temp = { depends-on = ["build"], cmd = "python temp.py" }
+configure = { depends-on = [
+    "clean",
+], cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug" }
+build = { cmd = "cmake --build build" }
+temp = { depends-on = ["build"], cmd = "python tests/test_attention.py" }
 ruff = "ruff"
 
 [tool.pixi.dependencies]
@@ -54,6 +57,8 @@ meson = "*"                 # Helpful for ninja configuration
 ccache = "*"                # Speed up rebuilds
 numba = ">=0.60.0,<0.61"
 clang-format = "*"
+triton = ">=3.1.0,<4"
+matplotlib = ">=3.10.0,<4"
 
 [project.optional-dependencies]
 test = ["pytest"]

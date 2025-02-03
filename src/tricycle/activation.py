@@ -1,3 +1,6 @@
+import triton
+import triton.language as tl
+
 from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.functions import Sigmoid
 from tricycle.initialisers import init_xavier
@@ -368,3 +371,129 @@ class GLU(Layer):
         Move the layer parameters from GPU to CPU memory.
         """
         self.linear.from_gpu()
+
+
+class ArrayWrapper:
+    def __init__(self, arr):
+        self.arr = arr
+        self.dtype = arr.dtype
+
+    def data_ptr(self):
+        return self.arr.data.ptr
+
+
+class TritonRelu(Layer):
+    block_size = 1024
+
+    def __init__(self):
+        super().__init__()
+        self.output = None
+        self.n_elements = None
+
+    def grid(self, meta):
+        n_blocks = triton.cdiv(self.n_elements, meta["BLOCK_SIZE"])
+        return (n_blocks,)
+
+    def forward(self, tensor: Tensor):
+        import cupy as cp
+
+        if self.output is None:
+            self.output = cp.empty_like(tensor.array)
+            self.output = ArrayWrapper(self.output)
+
+        self.n_elements = tensor.array.size
+
+        tensor.data_ptr = lambda: tensor.array.data.ptr
+
+        kernel_relu[self.grid](
+            in_ptr=tensor,
+            out_ptr=self.output,
+            n_elements=self.n_elements,
+            BLOCK_SIZE=self.block_size,
+        )
+
+        return Tensor(
+            self.output.arr, args=(tensor,), is_batched=tensor.is_batched
+        )
+
+
+@triton.jit
+def kernel_relu(
+    in_ptr,
+    out_ptr,
+    n_elements: int,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+
+    block_start = BLOCK_SIZE * pid
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    x = tl.load(in_ptr + offsets, mask=mask)
+
+    x = tl.maximum(x, 0)
+
+    tl.store(out_ptr + offsets, x, mask=mask)
+
+
+class TritonGeLU(Layer):
+    block_size = 1024
+
+    def __init__(self):
+        super().__init__()
+        self.output = None
+        self.n_elements = None
+
+    def grid(self, meta):
+        n_blocks = triton.cdiv(self.n_elements, meta["BLOCK_SIZE"])
+        return (n_blocks,)
+
+    def forward(self, tensor: Tensor):
+        import cupy as cp
+
+        if self.output is None:
+            self.output = cp.empty_like(tensor.array)
+            self.output = ArrayWrapper(self.output)
+
+        self.n_elements = tensor.array.size
+
+        tensor.data_ptr = lambda: tensor.array.data.ptr
+
+        kernel_gelu[self.grid](
+            in_ptr=tensor,
+            out_ptr=self.output,
+            n_elements=self.n_elements,
+            BLOCK_SIZE=self.block_size,
+        )
+
+        return Tensor(
+            self.output.arr, args=(tensor,), is_batched=tensor.is_batched
+        )
+
+
+@triton.jit
+def kernel_gelu(
+    in_ptr,
+    out_ptr,
+    n_elements: int,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+
+    block_start = BLOCK_SIZE * pid
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    x = tl.load(in_ptr + offsets, mask=mask)
+
+    cube = 0.044715 * x * x * x
+    sqrt_2_by_pi = 0.7978845608028654
+
+    # there is no tanhf in triton so we'll manually implement it
+    exp_2 = tl.exp(2 * sqrt_2_by_pi * (x + cube))
+    tanh = (exp_2 - 1) / (exp_2 + 1)
+
+    out = 0.5 * x * (1.0 + tanh)
+
+    tl.store(out_ptr + offsets, out, mask=mask)

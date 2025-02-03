@@ -1,17 +1,17 @@
 import numpy as np
 
-from tricycle.activation import CudaGeLU, CudaReLU, GeLU, ReLU
+from tricycle.activation import CudaGeLU, CudaReLU, GeLU, ReLU, TritonRelu
 from tricycle.attention import Attention, CudnnAttention
 from tricycle.layers import CudaDense, Dense
 from tricycle.tensor import Tensor
 from tricycle.utils import UseMixedPrecision
 
 N_LOOPS = 100
-INPUT_SHAPE = (2, 64, 16)
+# INPUT_SHAPE = (2, 64, 16)
 OUTPUT_SHAPE = 8
 N_HEADS = 2
 
-# INPUT_SHAPE = (16, 1024, 768)
+INPUT_SHAPE = (16, 1024, 768)
 # OUTPUT_SHAPE = 768
 # N_HEADS = 12
 
@@ -24,7 +24,7 @@ def bench_vanilla_relu():
     layer.to_gpu()
     for _ in range(N_LOOPS):
         output = layer(tensor)
-        output.backward()
+        # output.backward()
 
 
 def bench_cuda_relu():
@@ -35,7 +35,17 @@ def bench_cuda_relu():
     layer.to_gpu()
     for _ in range(N_LOOPS):
         output = layer(tensor)
-        output.backward()
+        # output.backward()
+
+
+def bench_triton_relu():
+    np.random.seed(0)
+    tensor = Tensor((np.random.random(INPUT_SHAPE) * 2 - 1))
+    tensor.to_gpu()
+    layer = TritonRelu()
+    for _ in range(N_LOOPS):
+        output = layer(tensor)
+        # output.backward()
 
 
 def bench_vanilla_dense():
@@ -251,13 +261,13 @@ def test_cudnn_attention_vs_pytorch():
 
 __benchmarks__ = [
     # (bench_vanilla_gelu, bench_cuda_gelu, "handcraft kernel for gelu"),
-    # (bench_vanilla_relu, bench_cuda_relu, "handcraft kernel for relu"),
+    (bench_vanilla_relu, bench_triton_relu, "handcraft kernel for relu"),
     # (bench_vanilla_dense, bench_cuda_dense, "vanilla vs cublas matmul"),
-    (
-        bench_vanilla_attention,
-        bench_cudnn_attention,
-        "vanilla vs cublas attention",
-    ),
+    # (
+    #     bench_vanilla_attention,
+    #     bench_cudnn_attention,
+    #     "vanilla vs cublas attention",
+    # ),
     # (bench_vanilla_dense, bench_cuda_dense, "vanilla vs cublas matmul"),
     # (bench_cuda_dense, bench_cuda_dense, "cuda vs cuda matmul"),
     # (bench_vanilla_dense, bench_vanilla_dense, "vanilla vs vanilla matmul"),
