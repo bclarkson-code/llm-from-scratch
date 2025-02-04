@@ -542,9 +542,9 @@ def kernel_gelu_bwd(
 
     # there is no tanh or sech in triton so we'll manually implement them
     tanh_arg = sqrt_2_by_pi * (x + cube)
-    exp_2 = tl.exp(2 * tanh_arg)
-    tanh = (exp_2 - 1) / (exp_2 + 1)
-    cosh = (tl.exp(tanh_arg) + tl.exp(-tanh_arg)) * 0.5
+    exp = tl.exp(tanh_arg)
+    tanh = (exp * exp - 1) / (exp * exp + 1)
+    cosh = (exp + 1 / exp) * 0.5
     sech = 1.0 / (cosh * cosh)
 
     first_term = 0.5 * (1 + tanh)
