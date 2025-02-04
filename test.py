@@ -32,15 +32,21 @@ from tricycle.tensor import Tensor
 def benchmark(size, provider):
     x = np.random.random(size).astype(np.float32)
     x = Tensor(x).to_gpu()
+    y = np.random.random(size).astype(np.float32)
+    y = Tensor(y).to_gpu()
     quantiles = [0.5, 0.2, 0.8]
     if provider == "tricycle":
         layer = GeLU()
-        layer(x)
+
     if provider == "triton":
         layer = TritonGeLU()
+
+    def fn():
         layer(x)
+        layer.backward(y)
+
     ms, min_ms, max_ms = triton.testing.do_bench(
-        lambda: layer(x), quantiles=quantiles
+        lambda: fn(), quantiles=quantiles
     )
     gbps = lambda ms: 3 * x.array.size * 32 * 1e-9 / (ms * 1e-3)
     return gbps(ms), gbps(max_ms), gbps(min_ms)

@@ -449,19 +449,39 @@ class TritonGeLU(Layer):
         n_blocks = triton.cdiv(self.n_elements, meta["BLOCK_SIZE"])
         return (n_blocks,)
 
+    def backward(self, grad: Tensor):
+        import cupy as cp
+
+        self.n_elements = grad.array.size
+        is_batched = grad.is_batched
+
+        input_grad = cp.empty_like(grad.array)
+        input_grad = ArrayWrapper(input_grad)
+
+        grad = ArrayWrapper(grad.array)
+
+        kernel_gelu_bwd[self.grid](
+            out_grad=grad,
+            input_grad=input_grad,
+            input_=self._input,
+            n_elements=self.n_elements,
+            BLOCK_SIZE=self.block_size,
+        )
+
+        return Tensor(input_grad.arr, is_batched=is_batched)
+
     def forward(self, tensor: Tensor):
         import cupy as cp
 
         if self.output is None:
             self.output = cp.empty_like(tensor.array)
             self.output = ArrayWrapper(self.output)
+        self._input = ArrayWrapper(tensor.array)
 
-        self.n_elements = tensor.array.size
+        self.n_elements = self._input.arr.size
 
-        tensor.data_ptr = lambda: tensor.array.data.ptr
-
-        kernel_gelu[self.grid](
-            in_ptr=tensor,
+        kernel_gelu_fwd[self.grid](
+            in_ptr=self._input,
             out_ptr=self.output,
             n_elements=self.n_elements,
             BLOCK_SIZE=self.block_size,
@@ -473,7 +493,7 @@ class TritonGeLU(Layer):
 
 
 @triton.jit
-def kernel_gelu(
+def kernel_gelu_fwd(
     in_ptr,
     out_ptr,
     n_elements: int,
@@ -497,3 +517,42 @@ def kernel_gelu(
     out = 0.5 * x * (1.0 + tanh)
 
     tl.store(out_ptr + offsets, out, mask=mask)
+
+
+@triton.jit
+def kernel_gelu_bwd(
+    out_grad,
+    input_grad,
+    input_,
+    n_elements: int,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+
+    block_start = BLOCK_SIZE * pid
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    x = tl.load(input_ + offsets, mask=mask)
+
+    sqrt_2_by_pi = 0.7978845608028654
+    const = 0.044715
+
+    cube = const * x * x * x
+
+    # there is no tanh or sech in triton so we'll manually implement them
+    tanh_arg = sqrt_2_by_pi * (x + cube)
+    exp_2 = tl.exp(2 * tanh_arg)
+    tanh = (exp_2 - 1) / (exp_2 + 1)
+    cosh = (tl.exp(tanh_arg) + tl.exp(-tanh_arg)) * 0.5
+    sech = 1.0 / (cosh * cosh)
+
+    first_term = 0.5 * (1 + tanh)
+    coef = x * 0.5 * sech * sqrt_2_by_pi
+    second_term = 1 + 3 * const * x * x
+
+    grad = tl.load(out_grad + offsets, mask=mask)
+
+    out = (first_term + coef * second_term) * grad
+
+    tl.store(input_grad + offsets, out, mask=mask)
