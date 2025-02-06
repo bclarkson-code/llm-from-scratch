@@ -394,6 +394,27 @@ class TritonRelu(Layer):
         n_blocks = triton.cdiv(self.n_elements, meta["BLOCK_SIZE"])
         return (n_blocks,)
 
+    def backward(self, grad: Tensor):
+        import cupy as cp
+
+        self.n_elements = grad.array.size
+        is_batched = grad.is_batched
+
+        input_grad = cp.empty_like(grad.array)
+        input_grad = ArrayWrapper(input_grad)
+
+        grad = ArrayWrapper(grad.array)
+
+        kernel_relu_bwd[self.grid](
+            out_grad_ptr=grad,
+            input_grad_ptr=input_grad,
+            input_ptr=self.input_,
+            n_elements=self.n_elements,
+            BLOCK_SIZE=self.block_size,
+        )
+
+        return Tensor(input_grad.arr, is_batched=is_batched)
+
     def forward(self, tensor: Tensor):
         import cupy as cp
 
@@ -401,12 +422,11 @@ class TritonRelu(Layer):
             self.output = cp.empty_like(tensor.array)
             self.output = ArrayWrapper(self.output)
 
-        self.n_elements = tensor.array.size
+        self.input_ = ArrayWrapper(tensor.array)
+        self.n_elements = self.input_.arr.size
 
-        tensor.data_ptr = lambda: tensor.array.data.ptr
-
-        kernel_relu[self.grid](
-            in_ptr=tensor,
+        kernel_relu_fwd[self.grid](
+            in_ptr=self.input_,
             out_ptr=self.output,
             n_elements=self.n_elements,
             BLOCK_SIZE=self.block_size,
@@ -418,7 +438,7 @@ class TritonRelu(Layer):
 
 
 @triton.jit
-def kernel_relu(
+def kernel_relu_fwd(
     in_ptr,
     out_ptr,
     n_elements: int,
@@ -435,6 +455,28 @@ def kernel_relu(
     x = tl.maximum(x, 0)
 
     tl.store(out_ptr + offsets, x, mask=mask)
+
+
+@triton.jit
+def kernel_relu_bwd(
+    input_ptr,
+    out_grad_ptr,
+    input_grad_ptr,
+    n_elements: int,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+
+    block_start = BLOCK_SIZE * pid
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    input_ = tl.load(input_ptr + offsets, mask=mask)
+    out_grad = tl.load(out_grad_ptr + offsets, mask=mask)
+
+    in_grad = tl.where(input_ < 0, 0, out_grad)
+
+    tl.store(input_grad_ptr + offsets, in_grad, mask=mask)
 
 
 class TritonGeLU(Layer):
@@ -461,9 +503,9 @@ class TritonGeLU(Layer):
         grad = ArrayWrapper(grad.array)
 
         kernel_gelu_bwd[self.grid](
-            out_grad=grad,
-            input_grad=input_grad,
-            input_=self._input,
+            out_grad_ptr=grad,
+            input_grad_ptr=input_grad,
+            input_ptr=self._input,
             n_elements=self.n_elements,
             BLOCK_SIZE=self.block_size,
         )
@@ -521,9 +563,9 @@ def kernel_gelu_fwd(
 
 @triton.jit
 def kernel_gelu_bwd(
-    out_grad,
-    input_grad,
-    input_,
+    out_grad_ptr,
+    input_grad_ptr,
+    input_ptr,
     n_elements: int,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -533,26 +575,26 @@ def kernel_gelu_bwd(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
 
-    x = tl.load(input_ + offsets, mask=mask)
+    input_ = tl.load(input_ptr + offsets, mask=mask)
 
     sqrt_2_by_pi = 0.7978845608028654
     const = 0.044715
 
-    cube = const * x * x * x
+    cube = const * input_ * input_ * input_
 
     # there is no tanh or sech in triton so we'll manually implement them
-    tanh_arg = sqrt_2_by_pi * (x + cube)
+    tanh_arg = sqrt_2_by_pi * (input_ + cube)
     exp = tl.exp(tanh_arg)
-    tanh = (exp * exp - 1) / (exp * exp + 1)
-    cosh = (exp + 1 / exp) * 0.5
+    tanh = (exp * exp - 1.0) / (exp * exp + 1.0)
+    cosh = (exp + 1.0 / exp) * 0.5
     sech = 1.0 / (cosh * cosh)
 
-    first_term = 0.5 * (1 + tanh)
-    coef = x * 0.5 * sech * sqrt_2_by_pi
-    second_term = 1 + 3 * const * x * x
+    first_term = 0.5 * (1.0 + tanh)
+    coef = input_ * 0.5 * sech * sqrt_2_by_pi
+    second_term = 1.0 + 3.0 * const * input_ * input_
 
-    grad = tl.load(out_grad + offsets, mask=mask)
+    grad = tl.load(out_grad_ptr + offsets, mask=mask)
 
     out = (first_term + coef * second_term) * grad
 
-    tl.store(input_grad + offsets, out, mask=mask)
+    tl.store(input_grad_ptr + offsets, out, mask=mask)
