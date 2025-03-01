@@ -66,10 +66,6 @@ class UseMixedPrecision:
     def __init__(self, initial_loss_scale_factor: int = 128):
         self.active = False
         TRICYCLE_CONTEXT.loss_scale_factor = initial_loss_scale_factor
-        warn(
-            "Mixed precision training is unstable. Expect your loss to "
-            "explode/vanish."
-        )
 
     def __enter__(self):
         """Enables mixed precision training."""

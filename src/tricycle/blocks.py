@@ -10,7 +10,7 @@ from typing import Literal
 import numpy as np
 
 from tricycle.activation import GLU, GeLU, ReLU, Swish
-from tricycle.attention import Attention, CudnnAttention
+from tricycle.attention import Attention
 from tricycle.initialisers import init_xavier
 from tricycle.layers import (  # noqa E501
     Dense,

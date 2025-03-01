@@ -1,12 +1,19 @@
 import numpy as np
 
-from tricycle.activation import CudaGeLU, CudaReLU, GeLU, ReLU, TritonRelu
-from tricycle.attention import Attention, CudnnAttention
+from tricycle.activation import (
+    CudaGeLU,
+    CudaReLU,
+    GeLU,
+    ReLU,
+    TritonGeLU,
+    TritonRelu,
+)
+from tricycle.attention import Attention
 from tricycle.layers import CudaDense, Dense
 from tricycle.tensor import Tensor
 from tricycle.utils import UseMixedPrecision
 
-N_LOOPS = 100
+N_LOOPS = 1000
 # INPUT_SHAPE = (2, 64, 16)
 OUTPUT_SHAPE = 8
 N_HEADS = 2
@@ -24,7 +31,7 @@ def bench_vanilla_relu():
     layer.to_gpu()
     for _ in range(N_LOOPS):
         output = layer(tensor)
-        # output.backward()
+        output.backward()
 
 
 def bench_cuda_relu():
@@ -45,7 +52,7 @@ def bench_triton_relu():
     layer = TritonRelu()
     for _ in range(N_LOOPS):
         output = layer(tensor)
-        # output.backward()
+        output.backward()
 
 
 def bench_vanilla_dense():
@@ -85,6 +92,16 @@ def bench_cuda_gelu():
     tensor = Tensor((np.random.random(INPUT_SHAPE) * 2 - 1))
     tensor.to_gpu()
     layer = CudaGeLU()
+    for _ in range(N_LOOPS):
+        output = layer(tensor)
+        output.backward()
+
+
+def bench_triton_gelu():
+    np.random.seed(0)
+    tensor = Tensor((np.random.random(INPUT_SHAPE) * 2 - 1))
+    tensor.to_gpu()
+    layer = TritonGeLU()
     for _ in range(N_LOOPS):
         output = layer(tensor)
         output.backward()
@@ -260,8 +277,8 @@ def test_cudnn_attention_vs_pytorch():
 
 
 __benchmarks__ = [
-    # (bench_vanilla_gelu, bench_cuda_gelu, "handcraft kernel for gelu"),
-    (bench_vanilla_relu, bench_triton_relu, "handcraft kernel for relu"),
+    (bench_vanilla_gelu, bench_triton_gelu, "handcraft kernel for gelu"),
+    # (bench_vanilla_relu, bench_triton_relu, "handcraft kernel for relu"),
     # (bench_vanilla_dense, bench_cuda_dense, "vanilla vs cublas matmul"),
     # (
     #     bench_vanilla_attention,

@@ -25,6 +25,7 @@ from tricycle.weakset import WeakSet
 
 if TYPE_CHECKING:
     from tricycle.ops import Op
+import cupy as cp
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class Tensor:
 
     def __init__(
         self,
-        array: ArrayLike,
+        array: cp.ndarray | np.ndarray,
         requires_grad: bool = True,
         is_batched: bool = False,
         args: tuple["Tensor", ...] | None = None,
@@ -440,7 +441,8 @@ class Tensor:
 
     def __repr__(self):
         name = f", name={self.name}" if self.name is not None else ""
-        return f"Tensor({self.array.__str__()}{name})"
+        array_string = np.array2string(self.array, precision=4, separator=",")
+        return f"Tensor({array_string}{name})"
 
     def __getitem__(self, idx):
         return Tensor(self.array[idx], requires_grad=self.requires_grad)
@@ -567,6 +569,12 @@ class Tensor:
 
         return UnarySum()(self)
 
+    @property
+    def strides(self) -> tuple[int, ...]:
+        strides = self.array.strides
+        n_bytes = self.array.itemsize  # Size in bytes of one element
+        return tuple(stride // n_bytes for stride in strides)
+
     def close_to(
         self,
         other: Union["Tensor", ArrayLike, float, int],
@@ -676,6 +684,9 @@ class Tensor:
         self.array = cupy.asnumpy(self.array)
         return self
 
+    def cpu(self):
+        return self.from_gpu()
+
     def zero_grad(self):
         """
         Removes any gradients or references to other tensors.
@@ -702,6 +713,12 @@ class Tensor:
         import cupy
 
         return cupy.asnumpy(self.array) if self.on_gpu else self.array
+
+    def data_ptr(self):
+        if self.on_gpu:
+            return self.array.data.ptr
+        pointer, _ = self.array.__array_interface__["data"]
+        return pointer
 
 
 def select_backend(*tensors: Tensor | np.ndarray | ArrayLike):

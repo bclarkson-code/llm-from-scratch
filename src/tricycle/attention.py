@@ -7,6 +7,7 @@ multi-head attention operations.
 """
 
 import ctypes
+import math
 from math import sqrt
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import numpy as np
 from tricycle import GPU_ENABLED
 from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.exceptions import GPUDisabledException
+from tricycle.kernels import _attn_bwd, _attn_fwd
 from tricycle.ops import Op
 from tricycle.tensor import Tensor
 
@@ -446,170 +448,176 @@ class CudaAttention(Op):
             self.mask = cp.asnumpy(self.mask)
 
 
-class CudnnAttention(Op):
-    lib_path: Path = (
-        Path(__file__).parent.parent.parent / "build/attention_cudnn.so"
-    )
+# CudnnAttention class has been removed
+
+
+class TritonAttention(Op):
     batch_size: int
-    context_window: int
+    n_tokens: int
     embedding_dim: int
     n_heads: int
+    causal: bool = True
+    sm_scale: float = 0.5
 
     def __init__(
         self,
         batch_size: int,
-        context_window: int,
+        n_tokens: int,
         embedding_dim: int,
         n_heads: int,
-        shared: dict[str, cp.ndarray],
     ):
         if not GPU_ENABLED:
-            raise GPUDisabledException("Cannot use CUDNN without a GPU")
-        # if not TRICYCLE_CONTEXT.use_mixed_precision:
-        #     raise NotImplementedError(
-        #         "CUDNN attention is only supported with FP16"
-        #     )
+            raise GPUDisabledException("Cannot use Triton without a GPU")
+
+        # sizes
         self.batch_size = batch_size
-        self.context_window = context_window
+        self.n_tokens = n_tokens
         self.embedding_dim = embedding_dim
         self.n_heads = n_heads
-        self.shared = shared
 
-        self.initialise_kernels()
-
-        input_shape = (
-            self.batch_size,
-            self.context_window,
-            3 * self.embedding_dim,
-        )
-        self.input = cp.zeros(input_shape, dtype=cp.float16)
-
-        stats_shape = (self.batch_size, self.n_heads, self.context_window)
-        self.stats = cp.zeros(stats_shape, dtype=cp.float32)
-
-        output_shape = (
-            self.batch_size,
-            self.context_window,
-            self.embedding_dim,
-        )
-        self.output = cp.zeros(output_shape, dtype=cp.float16)
-
-        if "attention_input_grad" not in shared:
-            # llmc has a 4 instead of a 3. it is unclear why. 3 seems to work fine for now
-            input_grad_shape = (
-                self.batch_size,
-                self.context_window,
-                3 * self.embedding_dim,
+        if self.embedding_dim % self.n_heads != 0:
+            raise ValueError(
+                f"n_heads must divide embedding dim. Found {n_heads=}, {embedding_dim=}"
             )
-            self.input_grad = cp.zeros(input_grad_shape, dtype=cp.float16)
-            shared["attention_input_grad"] = self.input_grad
-        else:
-            self.input_grad = shared["attention_input_grad"]
+        self.head_size = self.embedding_dim // self.n_heads
 
-        if "attention_output_grad" not in shared:
-            output_grad_shape = (
-                self.batch_size,
-                self.context_window,
-                self.embedding_dim,
-            )
-            self.output_grad = cp.zeros(output_grad_shape, dtype=cp.float16)
-            shared["attention_output_grad"] = self.output_grad
-        else:
-            self.output_grad = shared["attention_output_grad"]
+        self.result = None
+        self.mask = None
+        self.q = None
+        self.k = None
+        self.v = None
 
-    def initialise_kernels(self):
-        # Load the c functions
-        lib = ctypes.CDLL(str(self.lib_path))
-        self.stream = cp.cuda.get_current_stream()
+    def _fwd_grid(self, args):
+        import triton
 
-        # initialise cuda/cublas/cudnn
-        init = lib.initialize_cuda
-        init.argtypes = [ctypes.c_void_p]
-        init.restype = None
-        init(ctypes.c_void_p(self.stream.ptr))
+        return (
+            triton.cdiv(self.n_tokens, args["BLOCK_M"]),
+            self.batch_size * self.n_heads,
+            1,
+        )
 
-        # Define argument types for the kernels
-        forward_args = [
-            ctypes.c_void_p,  # float* out
-            ctypes.c_void_p,  # float* stats
-            ctypes.c_void_p,  # float* inp
-            ctypes.c_int,  # int B
-            ctypes.c_int,  # int T
-            ctypes.c_int,  # int NH
-            ctypes.c_int,  # int C
-            ctypes.c_void_p,  # cudaStream_t stream
-        ]
-        self.forward_kernel = lib.attention_forward_cudnn
-        self.forward_kernel.argtypes = forward_args
-        self.forward_kernel.restype = None
-
-        backward_args = [
-            ctypes.c_void_p,  # float* dqkvr
-            ctypes.c_void_p,  # float* dout
-            ctypes.c_void_p,  # float* qkvr
-            ctypes.c_void_p,  # float* o
-            ctypes.c_void_p,  # float* stats
-            ctypes.c_int,  # int B
-            ctypes.c_int,  # int T
-            ctypes.c_int,  # int NH
-            ctypes.c_int,  # int C
-            ctypes.c_void_p,  # cudaStream_t stream
-        ]
-        self.backward_kernel = lib.attention_backward_cudnn
-        self.backward_kernel.argtypes = backward_args
-        self.backward_kernel.restype = None
-
-    def forward(self, tensor: Tensor):
+    def forward(self, tensor: Tensor) -> Tensor:
         """
-        Attention with a custom cuda kernel
+        Attention with a custom flash-attention triton kernel
         """
         if tensor.xp is not cp:
-            raise ValueError("Cannot use numpy arrays with CUDNN")
+            raise ValueError("Cannot use numpy arrays with Triton")
+        xp = tensor.xp
 
-        self.input = tensor
-        input_data = tensor.array.reshape(
-            self.batch_size, self.context_window, 3, self.n_heads, -1
+        self._input = tensor
+
+        # Set scale factor based on head size
+        self.sm_scale = 1.0 / math.sqrt(self.head_size)
+
+        # q,k and v start in the same array so we need to extract them out to contiguous arrays
+        # for separate processing
+        embedding_dim = tensor.array.shape[-1] // 3
+        q = tensor.array[:, :, :embedding_dim]
+        k = tensor.array[:, :, embedding_dim : 2 * embedding_dim]
+        v = tensor.array[:, :, 2 * embedding_dim :]
+
+        q = xp.ascontiguousarray(q)
+        k = xp.ascontiguousarray(k)
+        v = xp.ascontiguousarray(v)
+        # Reshaping and transposing
+        head_shape = (
+            self.batch_size,
+            self.n_tokens,
+            self.n_heads,
+            self.head_size,
         )
-        input_data = input_data.transpose(0, 1, 3, 2, 4)
+        k = k.reshape(*head_shape).transpose(0, 2, 1, 3)
+        q = q.reshape(*head_shape).transpose(0, 2, 1, 3)
+        v = v.reshape(*head_shape).transpose(0, 2, 1, 3)
 
-        self.forward_kernel(
-            ctypes.c_void_p(self.output.data.ptr),  # float* out
-            ctypes.c_void_p(self.stats.data.ptr),  # float* stats
-            ctypes.c_void_p(self.input.array.data.ptr),  # float* inp
-            ctypes.c_int(self.batch_size),  # int B
-            ctypes.c_int(self.context_window),  # int T
-            ctypes.c_int(self.n_heads),  # int NH
-            ctypes.c_int(self.embedding_dim),  # int C
-            ctypes.c_void_p(self.stream.ptr),
+        self.k = Tensor(k, dtype=k.dtype)
+        self.q = Tensor(q, dtype=k.dtype)
+        self.v = Tensor(v, dtype=k.dtype)
+
+        # check that triton will be happy with head_size
+        HEAD_DIM_Q, HEAD_DIM_K, HEAD_DIM_V = (
+            q.shape[-1],
+            k.shape[-1],
+            v.shape[-1],
+        )
+        assert HEAD_DIM_Q == HEAD_DIM_K == HEAD_DIM_V == self.head_size
+        assert self.head_size in {16, 32, 64, 128, 256}
+
+        # allocate memory for output
+        if self.result is None:
+            self.result = Tensor(
+                xp.empty_like(self.q.array),
+                dtype=tensor.array.dtype,
+            ).to_gpu()
+
+        # allocate memory for mask
+        if self.mask is None:
+            self.mask = Tensor(
+                xp.zeros(
+                    (self.batch_size, self.n_heads, self.n_tokens),
+                ),
+                dtype=xp.float32,
+            ).to_gpu()
+
+        stage = 3 if self.causal else 1
+        extra_kern_args = {}
+
+        _attn_fwd[self._fwd_grid](
+            self.q,
+            self.k,
+            self.v,
+            self.sm_scale,
+            self.mask,
+            self.result,
+            self.q.strides[0],
+            self.q.strides[1],
+            self.q.strides[2],
+            self.q.strides[3],
+            self.k.strides[0],
+            self.k.strides[1],
+            self.k.strides[2],
+            self.k.strides[3],
+            self.v.strides[0],
+            self.v.strides[1],
+            self.v.strides[2],
+            self.v.strides[3],
+            self.result.strides[0],
+            self.result.strides[1],
+            self.result.strides[2],
+            self.result.strides[3],
+            self.batch_size,
+            self.n_heads,
+            N_CTX=self.n_tokens,
+            HEAD_DIM=self.head_size,
+            STAGE=stage,
+            **extra_kern_args,
         )
 
-        result = Tensor(self.output, is_batched=True)
-        result.back_fns = (self.backward,)
-        result.args = (self.input,)
-        return result
+        # recombine into (batch_size, n_tokens, embedding_dim)
+        return Tensor(
+            self.result.array.transpose(0, 2, 1, 3).reshape(
+                self.batch_size, self.n_tokens, self.embedding_dim
+            ),
+            is_batched=True,
+            args=(self._input,),
+            back_fns=(self.backward,),
+        )
 
     def backward(self, grad: Tensor):
         """
         Attention with a custom cuda kernel
         """
         if grad.xp is not cp:
-            raise ValueError("Cannot use numpy arrays with CUDNN")
+            raise ValueError("Cannot use numpy arrays with Triton")
         self.output_grad = grad
 
-        self.backward_kernel(
-            ctypes.c_void_p(self.input_grad.data.ptr),  # float* dqkvr
-            ctypes.c_void_p(self.output_grad.array.data.ptr),  # float* dout
-            ctypes.c_void_p(self.input.array.data.ptr),  # float* qkvr
-            ctypes.c_void_p(self.output.data.ptr),  # float* o
-            ctypes.c_void_p(self.stats.data.ptr),  # float* stats
-            ctypes.c_int(self.batch_size),  # int B
-            ctypes.c_int(self.context_window),  # int T
-            ctypes.c_int(self.n_heads),  # int NH
-            ctypes.c_int(self.embedding_dim),  # int C
-            ctypes.c_void_p(self.stream.ptr),  # cudaStream_t stream
+        assert (
+            self.q.stride()
+            == self.k.stride()
+            == self.v.stride()
+            == self.result.stride()
+            == grad.stride()
         )
-
-        return Tensor(self.input_grad)
 
     def to_gpu(self, *_):
         pass

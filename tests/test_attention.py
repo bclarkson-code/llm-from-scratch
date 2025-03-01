@@ -1,13 +1,24 @@
+import math
+from copy import deepcopy
+
 import numpy as np
+import pytest
 import torch
+import triton
+from matplotlib import pyplot as plt
 
 from tricycle import GPU_ENABLED
-from tricycle.attention import Attention, CudnnAttention, build_mask
+from tricycle.attention import Attention, TritonAttention, build_mask
 from tricycle.blocks import MultiHeadSelfAttention
 from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.einsum import Einsum
 from tricycle.exceptions import GPUDisabledException
 from tricycle.functions import Softmax
+from tricycle.kernels import (
+    TritonAttentionRef,
+    single_batched_matmul_kernel_1,
+    single_batched_matmul_kernel_2,
+)
 from tricycle.tensor import DEFAULT_DTYPE, Tensor
 from tricycle.utils import UseMixedPrecision
 
@@ -33,7 +44,9 @@ def pytorch_attention(q, k, v, B, T, C, n_head):
     return y
 
 
-def andrej_attention(q, k, v, B, T, C, n_head, block_size=32, bias=None):
+def andrej_attention(
+    q, k, v, B, T, C, n_head, block_size=32, bias=None, dtype=TORCH_DTYPE
+):
     """
     Andrej Karpathy's implementation of attention from nanogpt
     """
@@ -42,8 +55,10 @@ def andrej_attention(q, k, v, B, T, C, n_head, block_size=32, bias=None):
     from torch.nn import functional as F
 
     if bias is None:
-        bias = torch.tril(torch.ones(block_size, block_size)).view(
-            1, 1, block_size, block_size
+        bias = (
+            torch.tril(torch.ones(block_size, block_size))
+            .view(1, 1, block_size, block_size)
+            .to(q.device)
         )
     k = k.view(B, T, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
     q = q.view(B, T, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
@@ -58,7 +73,7 @@ def andrej_attention(q, k, v, B, T, C, n_head, block_size=32, bias=None):
     y = att @ v.to(
         torch.float32
     )  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-    return y.to(TORCH_DTYPE).transpose(1, 2).contiguous().view(B, T, C)
+    return y.to(dtype).transpose(1, 2).contiguous().view(B, T, C)
 
 
 def andrej_attention_block(
@@ -319,107 +334,188 @@ def generate_causal_mask(seq_length):
     return mask
 
 
-def test_cudnn_attention_vs_pytorch():
+# test_cudnn_attention_vs_pytorch has been removed
+
+
+def test_triton_attention_correctness_fp16():
+    """
+    Tests that TritonAttention produces results consistent with PyTorch and TritonAttentionRef
+    using float16 precision.
+    """
     if not GPU_ENABLED:
-        raise GPUDisabledException(
-            "Cannot run test test_cudnn_attention_vs_pytorch if GPU is not available"
+        pytest.skip(
+            "Cannot run test_triton_attention_correctness_fp16 if GPU is not available"
         )
-    import cupy as cp
-    import torch
 
-    INPUT_SHAPE = (2, 64, 16)
-    N_HEADS = 2
-    tolerance = 1e-4
+    # Setup parameters
+    n_tokens = 256
+    batch_size, n_heads, head_size = 4, 12, 64
 
-    # Set random seed for reproducibility
-    torch.manual_seed(42)
-    np.random.seed(42)
-    cp.random.seed(42)
+    DEVICE = torch.device("cuda:0")
+    dtype = torch.float16
 
-    # Parameters
-    B, T, C = INPUT_SHAPE
-    batch_size = B
-    embedding_dim = C
-    context_window = T
-    n_heads = N_HEADS
-    NH = n_heads
-    head_size = embedding_dim // n_heads
-    HS = C // NH
+    torch.manual_seed(0)
 
     # Create input tensor
-    input_np = np.random.randn(
-        batch_size, context_window, 3 * embedding_dim
-    ).astype(np.float16)
+    tensor = torch.empty(
+        (batch_size, n_tokens, n_heads * head_size * 3),
+        dtype=dtype,
+        device=DEVICE,
+    ).normal_(mean=0.0, std=0.5)
+    tricycle_tensor = Tensor(
+        deepcopy(tensor).cpu(), is_batched=True, dtype=np.float16
+    ).to_gpu()
+    sm_scale = 1 / math.sqrt(head_size)
 
-    input_tricycle = cp.array(input_np)
-    print("Pre-reshape Q:", input_tricycle[:, :, :C].get())
-    print("Pre-reshape K:", input_tricycle[:, :, C : 2 * C].get())
-    print("Pre-reshape V:", input_tricycle[:, :, 2 * C :].get())
-    input_tricycle = cp.ascontiguousarray(input_tricycle)
-    input_tricycle = input_tricycle.reshape(
-        (batch_size, context_window, 3, n_heads, head_size)
-    )
-    breakpoint()
-    input_tricycle = Tensor(input_tricycle, dtype=cp.float16).to_gpu()
-
-    input_torch = torch.from_numpy(input_np).to(torch.float16).cuda()
-
-    # error = np.mean(
-    #     np.abs(input_tricycle.array.get() - input_torch.cpu().detach().numpy())
-    #     / input_torch.cpu().detach().numpy()
-    # )
-    # assert error < tolerance, f"Attention input are different: {error=}"
-
-    cudnn_attention = CudnnAttention(
-        batch_size=batch_size,
-        embedding_dim=embedding_dim,
-        n_heads=N_HEADS,
-        context_window=T,
-        shared={},
-    )
-
-    torch_attention = torch.nn.MultiheadAttention(
-        embed_dim=embedding_dim,
-        num_heads=n_heads,
-        batch_first=True,
+    # Get torch output
+    q, k, v = tensor.split(head_size * n_heads, dim=-1)
+    torch_out = andrej_attention(
+        q,
+        k,
+        v,
+        batch_size,
+        n_tokens,
+        head_size * n_heads,
+        n_head=n_heads,
+        block_size=n_tokens,
         dtype=torch.float16,
-    ).cuda()
+    )
 
-    # Tricycle forward pass
+    # Get triton reference output
+    triton_output = TritonAttentionRef().forward(tensor, True, sm_scale)
+
+    # Verify TritonAttentionRef matches PyTorch with float16
+    assert torch.allclose(
+        triton_output, torch_out, rtol=1e-2, atol=1e-2
+    ), "TritonAttentionRef and PyTorch outputs don't match in float16"
+
+    # Get Tricycle output
     with UseMixedPrecision():
-        output_tricycle = cudnn_attention.forward(input_tricycle)
-        output_tricycle = output_tricycle.array.reshape(
-            batch_size, context_window, n_heads, -1
+        tricycle_layer = TritonAttention(
+            batch_size=batch_size,
+            n_tokens=n_tokens,
+            embedding_dim=n_heads * head_size,
+            n_heads=n_heads,
         )
-        output_tricycle = output_tricycle.transpose(0, 2, 1, 3).reshape(
-            batch_size, context_window, embedding_dim
-        )
-        output_tricycle = Tensor(
-            output_tricycle, dtype=cp.float16, is_batched=True
-        )
+        tricycle_layer.sm_scale = sm_scale
+        tricycle_layer.to_gpu()
+        tricycle_output_raw = tricycle_layer.forward(tricycle_tensor)
 
-    # Pytorch forward pass
-    causal_mask = generate_causal_mask(context_window).cuda()
-    q, k, v = input_torch.chunk(3, dim=-1)
-    print("PyTorch Q:", q[0, 0, :3])
-    print("PyTorch K:", k[0, 0, :3])
-    print("PyTorch V:", v[0, 0, :3])
-    output_torch, _ = torch_attention(
-        q, k, v, attn_mask=causal_mask, is_causal=True
+    # Convert Tricycle output to PyTorch tensor for comparison
+    tricycle_output = torch.tensor(
+        tricycle_output_raw.cpu().numpy(), dtype=dtype, device=DEVICE
     )
 
-    # Compare outputs
-    output_tricycle_np = output_tricycle.array.get()
-    output_torch_np = output_torch.cpu().detach().numpy()
-    error = np.mean(
-        np.abs(output_tricycle_np - output_torch_np) / output_torch_np
-    )
-    print(f"{ output_tricycle_np.mean() }")
-    print(f"{ output_torch_np.mean() }")
+    # Verify shapes match
     assert (
-        error < tolerance
-    ), f"Outputs are significantly different: {error=}. {output_tricycle_np[0][0]=}, {output_torch_np[0][0]=}"
+        torch_out.shape == tricycle_output.shape
+    ), "Output shapes don't match"
+
+    # Verify values are close using float16 precision
+    assert torch.allclose(
+        torch_out, tricycle_output, atol=1e-2, rtol=1e-2
+    ), "Outputs from TritonAttention don't match reference implementation in float16"
+
+
+def test_triton_attention_correctness_fp32():
+    """
+    Tests that TritonAttention produces results consistent with PyTorch and TritonAttentionRef
+    using float32 precision.
+    """
+    if not GPU_ENABLED:
+        pytest.skip(
+            "Cannot run test_triton_attention_correctness_fp32 if GPU is not available"
+        )
+
+    # Setup parameters
+    n_tokens = 256
+    batch_size, n_heads, head_size = 4, 12, 64
+
+    DEVICE = torch.device("cuda:0")
+
+    # Use float16 for input but convert to float32 for comparison
+    dtype_input = torch.float16
+    dtype_compare = torch.float32
+
+    torch.manual_seed(0)
+
+    # Create input tensor
+    tensor = torch.empty(
+        (batch_size, n_tokens, n_heads * head_size * 3),
+        dtype=dtype_input,
+        device=DEVICE,
+    ).normal_(mean=0.0, std=0.5)
+    tricycle_tensor = Tensor(
+        deepcopy(tensor).cpu(), is_batched=True, dtype=np.float16
+    ).to_gpu()
+    sm_scale = 1 / math.sqrt(head_size)
+
+    # Get torch output
+    q, k, v = tensor.split(head_size * n_heads, dim=-1)
+    torch_out = andrej_attention(
+        q,
+        k,
+        v,
+        batch_size,
+        n_tokens,
+        head_size * n_heads,
+        n_head=n_heads,
+        block_size=n_tokens,
+    )
+
+    # Get triton reference output
+    triton_output = TritonAttentionRef().forward(tensor, True, sm_scale)
+
+    # Verify TritonAttentionRef matches PyTorch with float32 conversion
+    assert torch.allclose(
+        triton_output.to(dtype_compare),
+        torch_out.to(dtype_compare),
+        rtol=1e-3,
+        atol=1e-3,
+    ), "TritonAttentionRef and PyTorch outputs don't match in float32"
+
+    # Get Tricycle output
+    with UseMixedPrecision():
+        tricycle_layer = TritonAttention(
+            batch_size=batch_size,
+            n_tokens=n_tokens,
+            embedding_dim=n_heads * head_size,
+            n_heads=n_heads,
+        )
+        tricycle_layer.sm_scale = sm_scale
+        tricycle_layer.to_gpu()
+        tricycle_output_raw = tricycle_layer.forward(tricycle_tensor)
+
+    # Convert Tricycle output to PyTorch tensor for comparison
+    tricycle_output = torch.tensor(
+        tricycle_output_raw.cpu().numpy(), dtype=dtype_input, device=DEVICE
+    )
+
+    # Verify shapes match
+    assert (
+        torch_out.shape == tricycle_output.shape
+    ), "Output shapes don't match"
+
+    # Verify values are close using float32 precision
+    assert torch.allclose(
+        torch_out.to(dtype_compare),
+        tricycle_output.to(dtype_compare),
+        atol=1e-3,
+        rtol=1e-3,
+    ), "Outputs from TritonAttention don't match reference implementation in float32"
 
 
 if __name__ == "__main__":
-    test_cudnn_attention_vs_pytorch()
+    try:
+        print("Testing with float16 precision...")
+        test_triton_attention_correctness_fp16()
+        print("✅ Float16 test passed")
+    except (AssertionError, RuntimeError) as e:
+        print(f"❌ Float16 test failed: {e}")
+
+    try:
+        print("\nTesting with float32 precision...")
+        test_triton_attention_correctness_fp32()
+        print("✅ Float32 test passed")
+    except (AssertionError, RuntimeError) as e:
+        print(f"❌ Float32 test failed: {e}")

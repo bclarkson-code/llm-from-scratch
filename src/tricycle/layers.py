@@ -1,12 +1,19 @@
+import math
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Sequence
 
+import triton
+import triton.language as tl
 from numpy._typing import ArrayLike
 
 from tricycle.binary import BinaryMultiply
 from tricycle.context import TRICYCLE_CONTEXT
 from tricycle.initialisers import init_xavier
+from tricycle.kernels import (
+    single_batched_matmul_kernel_1,
+    single_batched_matmul_kernel_2,
+)
 from tricycle.optimisers import Optimiser
 from tricycle.tensor import Tensor
 from tricycle.unary import nothing
@@ -408,6 +415,134 @@ class CudaDense(Layer):
             back_fns=(self.backward,),
             is_batched=tensor.is_batched,
         )
+
+    def update(self, optimiser: Optimiser):
+        self.weights = optimiser(self.weights)
+
+    def zero_grad(self):
+        self.weights.grad = None
+
+    def to_gpu(self, device: int = 0):
+        self.weights.to_gpu(device)
+        return self
+
+    def from_gpu(self):
+        self.weights.from_gpu()
+        return self
+
+
+class TritonDense(Layer):
+    weights: Tensor
+    from_size: int
+    to_size: int
+    name: str | None
+    block_size: int = 16
+
+    def __init__(
+        self, from_size: int, to_size: int, initialiser=init_xavier, name=None
+    ):
+        self.weights = initialiser(
+            (to_size, from_size), name="weights" if name is None else name
+        )
+        self.weights.array = self.weights.xp.ascontiguousarray(
+            self.weights.array, dtype=self.weights.xp.float16
+        )
+        self.name = name
+        self.from_size = from_size
+        self.to_size = to_size
+        self.tensors = {"weights": self.weights}
+        self.output = None
+
+    # def backward(self, grad: Tensor):
+    #     import cupy as cp
+
+    #     batch_size, n_tokens, _ = self._input.shape
+
+    #     result = cp.empty(
+    #         (batch_size, n_tokens, self.from_size), dtype=cp.float16
+    #     )
+
+    #     # calculate the gradient for the input
+    #     llmc.matmul_input_backward(
+    #         result,
+    #         self.weights.array,
+    #         grad.array,
+    #         batch_size,
+    #         n_tokens,
+    #         self.from_size,
+    #         self.to_size,
+    #         None,
+    #     )
+
+    #     # calculate the gradient for the weights and add it to the weights.grad
+    #     # array
+    #     if self.weights.grad is None:
+    #         self.weights.grad = Tensor(
+    #             cp.zeros((self.to_size, self.from_size), dtype=cp.float16)
+    #         )
+    #     # this function accumulates the result rather
+    #     # than overwriting the contents in the array
+    #     # This lets us avoid the overhead of another op when backpropagating
+    #     llmc.matmul_weight_backward(
+    #         self.weights.grad.array,
+    #         self._input,
+    #         grad.array,
+    #         batch_size,
+    #         n_tokens,
+    #         self.from_size,
+    #         self.to_size,
+    #         None,
+    #     )
+    #     return Tensor(
+    #         result,
+    #         requires_grad=grad.requires_grad,
+    #         name="back_dense_grad",
+    #         is_batched=True,
+    #     )
+
+    def forward(self, tensor: Tensor):
+        import cupy as cp
+
+        if self.output is None:
+            self.output = Tensor(cp.empty_like(tensor.array))
+
+        self._input = tensor
+        if self._input.array.ndim != 3:
+            raise ValueError("Only 3d arrays are supported for CudaDense")
+
+        batch_size, n_tokens, embedding_dim = self._input.shape
+
+        if embedding_dim != self.from_size:
+            raise ValueError(
+                "Expected final dimension of input to equal self.from_size . "
+                f"Found {embedding_dim=} and {self.from_size=}"
+            )
+        result = Tensor(
+            cp.empty((batch_size, n_tokens, self.to_size), dtype=cp.float16),
+            name="dense",
+            args=(tensor,),
+            # back_fns=(self.backward,),
+            is_batched=tensor.is_batched,
+        )
+
+        grid = (
+            triton.cdiv(n_tokens, 1),  # pid_0: i
+            triton.cdiv(self.to_size, 1),  # pid_1: k
+            triton.cdiv(batch_size, 1),  # pid_2: b
+        )
+
+        # ij,bjk -> bik
+        single_batched_matmul_kernel_2[grid](
+            x_ptr=self.weights,
+            y_ptr=self._input,
+            z_ptr=result,
+            i_size=n_tokens,
+            k_size=self.to_size,
+            b_size=batch_size,
+            j_size=self.from_size,
+        )
+
+        return result
 
     def update(self, optimiser: Optimiser):
         self.weights = optimiser(self.weights)
